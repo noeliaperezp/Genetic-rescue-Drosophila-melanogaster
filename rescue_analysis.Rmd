@@ -1,0 +1,3129 @@
+---
+title: "rescue_analysis"
+output: html_document
+date: "2024-01-25"
+---
+
+#1. Process raw reads:
+##Prepare raw files:
+###Copy all raw files:
+```{R, engine='bash'}
+
+#First, copy all the raw files from Humberto's folder to my folder for this project:
+mkdir -p /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+scp -p /share/rdata2/humberto/rescate/data/[NR]*fastq.gz /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+
+```
+
+###Check copy process:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+
+#First, generate md5sum records for the 'original' files (in Humberto's folder):
+md5sum /share/rdata2/humberto/rescate/data/[NR]*fastq.gz > md5sum_summary.original.txt
+
+#Second, generate md5sum records for the copied files (in my folder):
+md5sum [NR]*fastq.gz > md5sum_summary.copy.txt
+
+#Then check that md5sum_summary.original.txt and md5sum_summary.copy.txt files are identical. They are!
+
+```
+
+###Arrange files in folders:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+
+SAMPLES=$(ls [NR]*fastq.gz | cut -d'_' -f1 | sort -u)
+for sample in ${SAMPLES[@]}
+  do
+  echo $sample
+  mkdir $sample
+  mv $sample*fastq.gz $sample/
+  done
+
+```
+
+
+##Check fastqc quality:
+###fastqc_reports.sh
+```{R, engine='bash'}
+
+module load fastqc/0.11.8
+
+FOLDER=$(ls -d */ | cat -n | awk -v id=$SGE_TASK_ID -F "\t" '{if ($1==id) printf ("%s\n", $2)}')
+cd $FOLDER
+
+for file in $(ls *.fastq.gz)
+  do
+  echo $file
+  fastqc $file
+  done
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+N_FILES=$(ls -d */ | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/FASTQ/fastqc_reports.sh
+
+```
+
+###Download reports:
+```{bash}
+
+export SSHPASS=$(cat /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/Analisis_dani/rua2.txt)
+
+#Adequate error relativised by Pb:
+sshpass -e scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/FASTQ/*/*_fastqc.html /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/depresion_esteriles/fastqc/
+
+```
+
+
+##Remove adapters:
+###trimmomatic_trim.sh
+```{R, engine='bash'}
+
+module load trimmomatic/0.38
+
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ
+FOLDER=$(ls -d */ | cat -n | awk -v id=$SGE_TASK_ID -F "\t" '{if ($1==id) printf ("%s\n", $2)}')
+cd $FOLDER
+
+sample=$(echo $FOLDER | cut -d"/" -f1)
+java -jar /share/apps/trimmomatic/0.38/trimmomatic-0.38.jar PE "${sample}_1.fastq.gz" "${sample}_2.fastq.gz" -baseout "${sample}_noadapt.fastq.gz" ILLUMINACLIP:/share/apps/trimmomatic/0.38/adapters/NexteraPE-PE.fa:2:30:10
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/FASTQ/trimmomatic_trim.sh
+
+```
+
+###Send array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+N_FILES=$(ls -d */ | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/FASTQ/trimmomatic_trim.sh
+
+```
+
+
+##Trim reads:
+###erne_trim.sh
+```{R, engine='bash'}
+
+module load erne/2.1.1
+
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ
+FOLDER=$(ls -d */ | cat -n | awk -v id=$SGE_TASK_ID -F "\t" '{if ($1==id) printf ("%s\n", $2)}')
+cd $FOLDER
+
+sample=$(echo $FOLDER | cut -d"/" -f1)
+erne-filter --min-size 36 --query1 "${sample}_noadapt_1P.fastq.gz" --query2 "${sample}_noadapt_2P.fastq.gz" --output-prefix "${sample}_noadapt_trimmed" --gzip
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/FASTQ/erne_trim.sh
+
+```
+
+###Send array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+N_FILES=$(ls -d */ | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/FASTQ/erne_trim.sh
+
+#This step already outputs compressed files, so we can skip the compressing step. Also the merging step, given that in this project there aren't multiple fastq files per sample.
+
+```
+
+
+##Align reads:
+###bwa_mem_align_reads.sh
+```{R, engine='bash'}
+
+module load bwa/0.7.15
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ
+
+FOLDER=$(ls -d */ | cat -n | awk -v id=$SGE_TASK_ID -F "\t" '{if ($1==id) printf ("%s\n", $2)}')
+echo $FOLDER
+cd $FOLDER
+sample=$(echo $FOLDER | cut -d"/" -f1)
+
+echo "Aligning reads"
+bwa mem -t 4 -M /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta.gz ${sample}_noadapt_trimmed_1.fastq.gz ${sample}_noadapt_trimmed_2.fastq.gz > /share/rdata2/dani_k/proyecto_rescate/BAM/${sample}_noadapt_trimmed_bwa.sam
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/FASTQ/bwa_mem_align_reads.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/FASTQ/
+N_FILES=$(ls -d */ | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/FASTQ/bwa_mem_align_reads.sh
+
+```
+
+
+#2. Process aligned reads:
+##Compress from SAM to BAM:
+###sam_to_bam.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+module load samtools/1.4.1
+
+SAM=$(ls [NR]*_noadapt_trimmed_bwa.sam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools view -b -o ${SAM/.sam/.bam} $SAM
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/sam_to_bam.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/sam_to_bam.sh
+
+```
+
+##Sort BAMs:
+###bam_sort.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+module load samtools/1.4.1
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools sort $BAM -o ${BAM/.bam/.sorted.bam}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_sort.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#This will be launched in two halves: one for N samples and the other for R samples. AT first I launched everything together and I got some stuck CPU warnings.
+
+#Launch it as follows:
+SET="R" #"N" "R"
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+START=$(ls [NR]*_noadapt_trimmed_bwa.bam | grep -n "^$SET" | head -n1 | cut -d':' -f1)
+END=$(ls [NR]*_noadapt_trimmed_bwa.bam | grep -n "^$SET" | tail -n1 | cut -d':' -f1)
+qsub -cwd -l h=compute-0-9 -t $START-$END /share/rdata2/dani_k/proyecto_rescate/BAM/bam_sort.sh
+
+```
+
+##Index BAMs:
+###bam_index.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools index $BAM
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_index.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_index.sh
+
+```
+
+##Isolate BAMs:
+###bam_isolate.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools view -o ${BAM/.bam/.iso.bam} $BAM 2L 2R 3L 3R 4 X
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_isolate.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_isolate.sh
+
+```
+
+##Index isolated BAMs:
+###bam_iso_index.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools index $BAM
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_iso_index.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_iso_index.sh
+
+```
+
+##Remove duplicate reads:
+###bam_rmdup.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools rmdup $BAM ${BAM/.iso.bam/.iso_rmdup.bam}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_rmdup.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_rmdup.sh
+
+```
+
+##Filter by mapping quality:
+###bam_mapqual.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools view -q $1 -o ${BAM/rmdup.bam/rmdup_mq$1.bam} $BAM
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_mapqual.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_mapqual.sh QUAL #replace QUAL by the minimum desired mapping quality (in this case, it's 30)
+
+```
+
+##Add read groups:
+###bam_readgr.sh
+```{R, engine='bash'}
+
+module load java/jre/1.8.0_73
+module load picard/2.14.0
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30.bam | head -n$SGE_TASK_ID | tail -n1)
+SAMPLE=$(echo $BAM | cut -d'_' -f1)
+
+picard AddOrReplaceReadGroups I=$BAM O=${BAM/.bam/_rg.bam} RGLB=$SAMPLE RGPL=Illumina RGPU=unk RGSM=$SAMPLE
+samtools index ${BAM/.bam/_rg.bam}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_readgr.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_readgr.sh
+
+```
+
+##Perform INDEL realignment:
+###Obtain realignment targets:
+####gatk_realign_target.sh
+```{R, engine='bash'}
+
+module load java/jre/1.8.0_73
+module load GATK/3.8
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+gatk -T RealignerTargetCreator -I multirealignment_bam.list -o multirealignment_target.list -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/gatk_realign_target.sh
+
+```
+
+####Send array-job:
+```{R, engine='bash'}
+
+#Note that /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta was already indexed before as part of another project. Otherwise it needs to be indexed before running this script.
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg.bam > multirealignment_bam.list
+qsub -cwd -l h=compute-0-9 /share/rdata2/dani_k/proyecto_rescate/BAM/gatk_realign_target.sh
+
+```
+
+###Perform multirealignment:
+####gatk_multirealignment.sh
+```{R, engine='bash'}
+
+module load java/jre/1.8.0_73
+module load GATK/3.8
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg.bam | head -n$SGE_TASK_ID | tail -n1)
+
+java -Xmx4g -jar /share/apps/GATK/3.8/GenomeAnalysisTK.jar -T IndelRealigner -I $BAM -o ${BAM/.bam/_realigned.bam} -targetIntervals $1 -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/gatk_multirealignment.sh
+
+```
+
+####Send parallel array-jobs:
+```{R, engine='bash'}
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/gatk_multirealignment.sh multirealignment_target.list #Pass as an additional argument the target list obtained with the previous script
+
+```
+
+##Isolate chromosomes:
+###bam_chromosomes.sh
+```{R, engine='bash'}
+
+module load samtools/1.4.1
+cd /share/rdata2/dani_k/proyecto_rescate/BAM
+
+CHR=$1
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | head -n$SGE_TASK_ID | tail -n1)
+
+samtools view -o chr$CHR/${BAM/.bam/.chr$CHR.bam} $BAM $CHR
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/bam_chromosomes.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+CHR="3R" #2L #2R #3L #3R
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+mkdir -p chr$CHR
+
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/bam_chromosomes.sh $CHR
+
+```
+
+##Perform qualimap analysis:
+###Autosomes:
+####qualimap_regions_autosomes.sh
+```{R, engine='bash'}
+
+module load qualimap/2.2.1
+BAM=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | head -n$SGE_TASK_ID | tail -n1)
+
+qualimap bamqc --java-mem-size=3G -c -bam $BAM -outdir qualimap_results/${BAM/.bam/.qualimap}/ -outfile ${BAM/.bam/_orthologs.autosomes.qualimap} -gff /share/rdata/ramon.pouso/outgroups/orthologs/dmel_dsim_dyak_orthologs.db_coord_sorted_merged.autosomes.6field_bed #this one is limited to orthologous regions (autosomes only)
+mv qualimap_results/${BAM/.bam/.qualimap}/genome_results.txt qualimap_results/${BAM/.bam/.qualimap}/${BAM/.bam/_orthologs.autosomes.qualimap.txt}
+
+qualimap bamqc --java-mem-size=3G -c -bam $BAM -outdir qualimap_results/${BAM/.bam/.qualimap}/ -outfile ${BAM/.bam/_whole-genome.autosomes.qualimap} #this one is for the whole-genome (autosomes only)
+mv qualimap_results/${BAM/.bam/.qualimap}/genome_results.txt qualimap_results/${BAM/.bam/.qualimap}/${BAM/.bam/_whole-genome.autosomes.qualimap.txt}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/BAM/qualimap_regions_autosomes.sh
+
+```
+
+####Send parallel array-jobs:
+```{R, engine='bash'}
+
+#If necessary, obtain first the autosomes version of the whole-genome orthologous regions (/share/rdata/ramon.pouso/outgroups/orthologs/dmel_dsim_dyak_orthologs.db_coord_sorted_merged.6field_bed) by excluding the X chromosome.
+
+#Launch it as follows:
+cd /share/rdata2/dani_k/proyecto_rescate/BAM/
+N_FILES=$(ls [NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/BAM/qualimap_regions_autosomes.sh
+
+```
+
+
+#3. Perform the GATK calling:
+##Generate gVCFs:
+###gvcf_autosomes.sh
+```{R, engine='bash'}
+
+BAM=$(ls /share/rdata2/dani_k/proyecto_rescate/BAM/[NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | head -n$SGE_TASK_ID | tail -n1)
+SAMPLE=$(echo $BAM | rev | cut -d'/' -f1 | rev | cut -d'_' -f1)
+
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+gatk HaplotypeCaller -I $BAM -O /share/rdata2/dani_k/proyecto_rescate/variants/${SAMPLE}_autosomes.g.vcf -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta -L /share/rdata/ramon.pouso/INDIVIDUOS/gen40/regions_of_interest_autosomic.bed -ploidy 2 -ERC BP_RESOLUTION -stand-call-conf 10.0
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/variants/gvcf_autosomes.sh
+
+```
+
+###Send parallel array-jobs:
+```{R, engine='bash'}
+
+mkdir /share/rdata2/dani_k/proyecto_rescate/variants/
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+N_FILES=$(ls /share/rdata2/dani_k/proyecto_rescate/BAM/[NR]*_noadapt_trimmed_bwa.sorted.iso_rmdup_mq30_rg_realigned.bam | wc -l)
+qsub -cwd -l h=compute-0-9 -t 1-$N_FILES /share/rdata2/dani_k/proyecto_rescate/variants/gvcf_autosomes.sh
+
+```
+
+##Combine gVCFs:
+###combine_gvcf_autosomes.sh:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants
+SAMPLE=$(ls *autosomes.g.vcf)
+
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+gatk CombineGVCFs -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta -L /share/rdata/ramon.pouso/INDIVIDUOS/gen40/regions_of_interest_autosomic.bed \
+$(for s in ${SAMPLE[@]}; do echo "--variant ${s}"; done) \
+-O NRall_autosomes.g.vcf
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/variants/combine_gvcf_autosomes.sh
+
+```
+
+###Send array-job:
+```{R, engine='bash'}
+
+mkdir -p /share/rdata2/dani_k/proyecto_rescate/variants/
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+qsub -cwd -l h=compute-0-9 /share/rdata2/dani_k/proyecto_rescate/variants/combine_gvcf_autosomes.sh
+
+```
+
+##Genotype gVCF:
+###genotype_gvcf_autosomes.sh:
+```{R, engine='bash'}
+
+#Add genotype information to all variants.
+cd /share/rdata2/dani_k/proyecto_rescate/variants
+SAMPLE=$(ls *autosomes.g.vcf)
+
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+gatk GenotypeGVCFs -V NRall_autosomes.g.vcf -O NRall_autosomes.vcf -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/variants/genotype_gvcf_autosomes.sh
+
+```
+
+###Send array-job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+qsub -cwd -l h=compute-0-9 /share/rdata2/dani_k/proyecto_rescate/variants/genotype_gvcf_autosomes.sh
+
+```
+
+
+#4. Process the VCF:
+##Filter VCF:
+###filter_vcf_autosomes.sh
+```{R, engine='bash'}
+
+#Apply filters to the VCF:
+module load bcftools/1.9
+module load gcc/7.2.0
+module add gcc/7.2.0
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+export PATH=$PATH:/share/apps/bedtools2/bin:/share/apps/est-sfs-release-2.03/:/share/apps/BAMTOOLS/bin:/share/apps/bedtools2/bin
+
+VCF=$1
+
+#Keep only those sites within the previously selected orthologous regions.
+echo "intersecting with orthologous regions"
+bedtools intersect -a $VCF -b /share/rdata/ramon.pouso/outgroups/orthologs/dmel_dsim_dyak_orthologs.db_coord_sorted_merged.bed -header > ${VCF/.vcf/.orthologs.confident.vcf}
+
+#Mask highly repeated, low-information areas.
+echo "removing repetitive regions"
+bedtools subtract -a ${VCF/.vcf/.orthologs.confident.vcf} -b /share/rdata/ramon.pouso/reference/indexed_reference/dmel-r6.14_mask.bed -header > ${VCF/.vcf/.orthologs.confident.masked.vcf}
+
+#Remove multialelic SNPs and indels, monomorphic SNPs, SNPs in the close proximity of indels (10 bp), and sites not covered in more than 3 individuals.
+echo "removing INDELs, monomorphic and multiallelic SNPs, SNPs close to INDELs, and high-missingness sites"
+bcftools filter -e 'AC==0 || AC==AN || F_MISSING > 0.15' --SnpGap 10 ${VCF/.vcf/.orthologs.confident.masked.vcf} | bcftools view -m2 -M2 -v snps -O v -o ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.vcf}
+
+#Remove low- and high-depth SNPs.
+DP_AVG=$(grep -v '^#' ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.vcf} | cut -f8 | awk -F";DP=|;ExcessHet" '{printf ("%s\n",$2)}' | awk '{sum+=$1}END{print sum/NR}')
+DP_SD=$(grep -v '^#' ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.vcf} | cut -f8 | awk -F";DP=|;ExcessHet" '{printf ("%s\n",$2)}' | awk '{sum+=$1; sumsq+=$1*$1}END{print sqrt(sumsq/NR - (sum/NR)**2)}')
+DP_AVG_MINUS_SD=$(bc -l <<< "$DP_AVG-2.5*$DP_SD")
+DP_AVG_PLUS_SD=$(bc -l <<< "$DP_AVG+2.5*$DP_SD")
+echo "removing low (< $DP_AVG_MINUS_SD) and high (> $DP_AVG_PLUS_SD) depth SNPs"
+bcftools filter -e "INFO/DP<=$DP_AVG_MINUS_SD || INFO/DP>=$DP_AVG_PLUS_SD" ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.vcf} -O v -o ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.vcf}
+
+#Filter variants using GATK’s recommended presets.
+echo "applying GATK's recommended hard-filters"
+gatk VariantFiltration -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta -V ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.vcf} \
+-filter "QD < 2.0" --filter-name "QD2" \
+-filter "FS > 60.0" --filter-name "FS60" \
+-filter "SOR > 3.0" --filter-name "SOR3" \
+-filter "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \
+-filter "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8" \
+-filter "QUAL < 30.0" --filter-name "QUAL30" \
+-filter "MQ < 30.0" --filter-name "MQ30" \
+-O ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.tagged.vcf}
+
+#Extract variants that have passed the filter.
+grep -e '^#' ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.tagged.vcf} > ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.vcf}
+grep -ve '^#' ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.tagged.vcf} | grep 'PASS' >> ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.vcf}
+
+#Finally, use bedtools to filter the autosomal SNP set from the slow inbreeding project (autosomal SNPs in orthologous regions).
+echo "keeping only previously identified SNPs in orthologous regions"
+awk '$1!="X"' /share/rdata/ramon.pouso/POOLS/all_gens_0_140/est-sfs/output_pipeline/gen0-140_all_sites.orthologs.confident.DP_EM_filtered.sum_gen0_gen20_gen30_allele_counts.extrapolated_to_180.ancestral_vs_derived_complete.confident.rate6.pval.bed | bedtools intersect -a ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.vcf} -b stdin -header > ${VCF/.vcf/.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.vcf}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/variants/filter_vcf_autosomes.sh
+
+``` 
+
+###Send array-job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+VCF="NRall_autosomes.vcf"
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/variants/filter_vcf_autosomes.sh $VCF
+
+```
+
+###Check files:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+grep -v '^#' NRall_autosomes.vcf | wc -l #1010367
+grep -v '^#' NRall_autosomes.orthologs.confident.vcf | wc -l #628898
+grep -v '^#' NRall_autosomes.orthologs.confident.masked.vcf | wc -l #580725
+grep -v '^#' NRall_autosomes.orthologs.confident.masked.bcf_filtered.vcf | wc -l #268792
+grep -v '^#' NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.vcf | wc -l #265903
+grep -v '^#' NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.vcf | wc -l #262719
+grep -v '^#' NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.vcf | wc -l #207453
+
+```
+
+##Alternative filtering including neutral regions:
+###filter_vcf_autosomes.wg.sh
+```{R, engine='bash'}
+
+#Apply filters to the VCF:
+module load bcftools/1.9
+module load gcc/7.2.0
+module add gcc/7.2.0
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+export PATH=$PATH:/share/apps/bedtools2/bin:/share/apps/est-sfs-release-2.03/:/share/apps/BAMTOOLS/bin:/share/apps/bedtools2/bin
+
+VCF=$1
+
+#Mask highly repeated, low-information areas.
+echo "removing repetitive regions"
+bedtools subtract -a ${VCF} -b /share/rdata/ramon.pouso/reference/indexed_reference/dmel-r6.14_mask.bed -header > ${VCF/.vcf/.w-g.confident.masked.vcf}
+
+#Remove multialelic SNPs and indels, monomorphic SNPs, SNPs in the close proximity of indels (10 bp), and sites not covered in more than 3 individuals.
+echo "removing INDELs, monomorphic and multiallelic SNPs, SNPs close to INDELs, and high-missingness sites"
+bcftools filter -e 'AC==0 || AC==AN || F_MISSING > 0.15' --SnpGap 10 ${VCF/.vcf/.w-g.confident.masked.vcf} | bcftools view -m2 -M2 -v snps -O v -o ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.vcf}
+
+#Filter variants using GATK’s recommended presets.
+echo "applying GATK's recommended hard-filters"
+gatk VariantFiltration -R /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.fasta -V ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.vcf} \
+-filter "QD < 2.0" --filter-name "QD2" \
+-filter "FS > 60.0" --filter-name "FS60" \
+-filter "SOR > 3.0" --filter-name "SOR3" \
+-filter "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \
+-filter "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8" \
+-filter "QUAL < 30.0" --filter-name "QUAL30" \
+-filter "MQ < 30.0" --filter-name "MQ30" \
+-O ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.tagged.vcf}
+
+#Extract variants that have passed the filter.
+grep -e '^#' ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.tagged.vcf} > ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.hard_filtered.vcf}
+grep -ve '^#' ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.tagged.vcf} | grep 'PASS' >> ${VCF/.vcf/.w-g.confident.masked.bcf_filtered.hard_filtered.vcf}
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/variants/filter_vcf_autosomes.wg.sh
+
+``` 
+
+###Send array-job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+VCF="NRall_autosomes.vcf"
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/variants/filter_vcf_autosomes.wg.sh $VCF
+
+```
+
+##Alternative filtering keeping all biallelic SNPs:
+```{R, engine='bash'}
+
+#Apply filters to the VCF:
+module load bcftools/1.9
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+VCF="NRall_autosomes.vcf"
+
+#Remove multialelic SNPs and indels, monomorphic SNPs, and chromosome 4.
+echo "removing INDELs, monomorphic and multiallelic SNPs, and chromosome 4"
+bcftools filter -e 'AC==0 || AC==AN' $VCF | awk '$1!="4"' | bcftools view -m2 -M2 -v snps -O v -o ${VCF/.vcf/.w-g.raw_snps.vcf}
+
+``` 
+
+
+#5. Perform the polarisation:
+##Use est-sfs to infer ancestral and derived alleles.
+###README.
+```{bash}
+
+#We'll be using the est-sfs inference from the slow inbreeding project (all_sites_pipeline.Rmd). We're already analysing only sites from that project.
+
+```
+
+##Polarise the VCFs.
+###Filter polarisable sites and fill the ancestral allele data:
+```{bash}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+#Due to the previous filter, the VCF already contains only polarisable sites.
+#Launch fill-aa.sh (locally, not with qsub due to problems with PERL5LIB) in order to fill the VCF with the ancestral alleles:
+/share/rdata/ramon.pouso/Scripts/fill-aa.sh NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.vcf
+
+```
+
+###fill-aa.sh
+```{bash}
+
+#Code to annotate the AA (ancestral alleles) subfield from the INFO field in the VCF. Save it as: /share/rdata/ramon.pouso/Scripts/fill-aa.sh
+module load vcftools/0.1.17 
+module load samtools/1.4.1 
+export PERL5LIB=/DATA/APPS/vcftools/0.1.17/lib/site_perl/5.24.1/
+cat $1 | fill-aa -a /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa.gz > ${1/.vcf/.aafilled.vcf}
+
+#Save it as /share/rdata/ramon.pouso/Scripts/fill-aa.sh
+
+```
+
+###Polarise the AA-filled VCF:
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants
+#Polarize the AA-filled VCF based on the new INFO/AA column. Alleles will be switched whenever the ancestral allele matches the alternative one, and genotypes will be properly recoded as well. The following code was originally provided by Pierre Lindenbaum and modified by José Luis Castro.
+
+FILE=NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.aafilled.vcf
+
+grep -v '^#' $FILE | awk -F"\t|;AA=" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$5,$4,$6,$7,$9)}' | awk -F"\t" '($4!=$8 && $5!=$8) {printf ("%s\t%s\t%s\n", $1,$2-1,$2)}' > ${FILE/.vcf/.unpolarisable.bed}
+
+bedtools subtract -a $FILE -b ${FILE/.vcf/.unpolarisable.bed} -header | java -jar /DATA/APPS/jvarkit/dist/vcffilterjdk.jar -e 'if(variant.getNAlleles()!=2 || !variant.hasAttribute("AA")) return true; 
+final String aa = variant.getAttributeAsString("AA",""); 
+if(!variant.getAlleles().get(1).getDisplayString().equalsIgnoreCase(aa)) return true; 
+VariantContextBuilder vb=new VariantContextBuilder(variant); 
+
+Allele oldalt = variant.getAlleles().get(1);
+Allele oldref = variant.getAlleles().get(0); 
+Allele ref= Allele.create(oldalt.getDisplayString(),true); 
+Allele alt= Allele.create(oldref.getDisplayString(),false);
+
+vb.alleles(Arrays.asList(ref,alt)); 
+
+List genotypes= new ArrayList<>(); 
+for(Genotype g: variant.getGenotypes()) 
+  { 
+  if(!g.isCalled()) 
+  { genotypes.add(g); continue;} 
+  GenotypeBuilder gb = new GenotypeBuilder(g); 
+  List alleles = new ArrayList<>(); 
+  for(Allele a:g.getAlleles()) { 
+    if(a.equals(oldalt)) { a=ref;} 
+    else if(a.equals(oldref)) { a=alt;} 
+    alleles.add(a); 
+    } 
+  if(g.hasPL()) { 
+    int pl[] = g.getPL(); 
+    int pl2[] = new int[pl.length]; 
+    for(int i=0;i< pl.length;i++) pl2[i]=pl[(pl.length-1)-i]; 
+    gb.PL(pl2); 
+    } 
+  if(g.hasAD()) 
+    { int ad[] = g.getAD(); 
+    int ad2[] = new int[ad.length]; 
+    for(int i=0;i< ad.length;i++) ad2[i]=ad[(ad.length-1)-i];
+    gb.AD(ad2); 
+  } 
+  genotypes.add(gb.alleles(alleles).make()); 
+  }
+
+vb.attribute("AF",1.0d - Double.parseDouble(variant.getAttributeAsString("AF",""))); vb.attribute("AC",variant.getGenotypes().stream().flatMap(G->G.getAlleles().stream()).filter(A->A.equals(oldref)).count()); 
+vb.genotypes(genotypes); 
+return vb.make();' -o ${FILE/.aafilled.vcf/.polarized.vcf}
+
+```
+
+
+#6. Carry out general annotation with ANNOVAR:
+##Build the drosophila database.
+###Good complete version (changes codes in the UCSC database).
+```{R, engine='bash'}
+
+#This chunk doesn't need to be repeated; do not run it unless the files were removed.
+
+#First, copy the original version of the database (and rename it as "old_annovar_database") so that any new changes do not overwrite the original version.
+cd /share/rdata/ramon.pouso/reference/indexed_reference
+scp -pr annovar_database old_annovar_database
+
+cd annovar_database/ancestral_dm6/
+
+#Note: any code involving annotate_variation.pl won't work because apparently the server blocks its attempts to download files from an external website, so I had to replace it with alternative code.
+
+#The following commented section doesn't need to be repeated:
+<!-- #First download, uncompress and rename the gene database: -->
+<!-- wget https://hgdownload.cse.ucsc.edu/goldenPath/dm6/database/refGene.txt.gz -->
+<!-- gunzip -c refGene.txt.gz > dm6_refGene.txt -->
+
+<!-- #Next, download the chromosome names equivalence file (aka "alias" or "dictionary"), which we'll need to edit the gene database so that the scaffolds use the same nomenclature as our files: -->
+<!-- wget https://hgdownload.cse.ucsc.edu/goldenPath/dm6/bigZips/dm6.chromAlias.txt -->
+<!-- nano dm6.chromAlias.txt #edit it to add "mitochondrion_genome" in the fourth column for the row that starts with chrM. -->
+
+<!-- #Then we can replace all database names with the UCSC names, which are used in our VCFs and fasta files. -->
+<!-- DB_CODES=$(cut -f3 dm6_refGene.txt | sort | uniq) -->
+<!-- for old_code in ${DB_CODES[@]} -->
+<!--   do -->
+<!--   new_code=$(awk -v old=$old_code '$1==old' /share/rdata/ramon.pouso/reference/indexed_reference/annovar_database/ancestral_dm6/dm6.chromAlias.txt | cut -f4) -->
+<!--   echo "${old_code} -> ${new_code}" -->
+<!--   sed -i -e "s/\<$old_code\>/$new_code/g" dm6_refGene.txt -->
+<!--   done -->
+
+<!-- diff <(cut -f-2,4- dm6_refGene.txt) <(cut -f-2,4- refGene.txt) #checks whether the previous loop modified any other field. Since no lines are returned, both files are identical (outside of the 3rd column, which was changed). -->
+
+#The following has to be repeated, since the new polarisation means that the ancestral genome has changed:
+#Copy the ancestral fasta (obtained in the polarisation.Rmd script) to the aproppriate folder:
+scp -p /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa dm6_seq/dm6_ancestral_dmel-all-chromosome-r6.14.fa
+
+#Next, use annovar to build the gene database:
+module load annovar/4.19
+retrieve_seq_from_fasta.pl dm6_refGene.txt -seqfile dm6_seq/dm6_ancestral_dmel-all-chromosome-r6.14.fa -format refGene -outfile dm6_refGeneMrna.fa
+
+```
+
+###Good non-redundant version (changes codes in the UCSC database).
+```{R, engine='bash'}
+
+#This chunk doesn't need to be repeated; do not run it unless the files were removed.
+
+#This version is a clone of the good complete version from which we'll remove all isoforms except for the longest one. Hence this is the "non-redundant" or "main isoforms" version of the annovar database, which we'll use to simplify the subsequent PROVEAN annotation.
+
+#The following commented section doesn't need to be repeated:
+<!-- #First, download the .gtf gene database from the UCSC: -->
+<!-- cd /share/rdata/ramon.pouso/reference/indexed_reference/ -->
+<!-- wget https://hgdownload.soe.ucsc.edu/goldenPath/dm6/bigZips/genes/dm6.refGene.gtf.gz -->
+<!-- gunzip dm6.refGene.gtf.gz -->
+
+<!-- #Then extract the list of transcripts, calculate their size, and keep the largest one for each chromosome. -->
+<!-- awk -F"\t|gene_id |; transcript_id |;  gene_name " '($1 == "chr2L" || $1 == "chr2R" || $1 == "chr3L" || $1 == "chr3R" || $1 == "chr4" || $1 == "chrX") && $3=="transcript" {printf ("%s\t%s\t%s\t%s\n"),$1,$5-$4,$10,$11}' dm6.refGene.gtf | sed 's/"//g' | sort -k1,1 -k3,3 -k2,2nr | sort -k3,3 -u | sort -k1,1 -k3,3 > dm6nr.refGene.txt -->
+<!-- grep -Ff <(cut -f4 dm6nr.refGene.txt) dm6.refGene.gtf > dm6nr.refGene.gtf -->
+
+#Next, clone the previous ancestral database and rename it and some of its files to include the code "nr" (non-redundant):
+cd /share/rdata/ramon.pouso/reference/indexed_reference/annovar_database/
+#scp -pr ancestral_dm6 nr_ancestral_dm6
+cd nr_ancestral_dm6
+mv dm6_seq dm6nr_seq
+mv dm6nr_seq/dm6_ancestral_dmel-all-chromosome-r6.14.fa dm6nr_seq/dm6nr_ancestral_dmel-all-chromosome-r6.14.fa
+mv dm6.chromAlias.txt dm6nr.chromAlias.txt
+rm dm6_refGeneMrna.fa
+
+#Then subset the dm6 annovar database so that only main isoforms are kept, and remove the original database.
+grep -Ff <(cut -f4 /share/rdata/ramon.pouso/reference/indexed_reference/dm6nr.refGene.txt) dm6_refGene.txt > dm6nr_refGene.txt
+rm dm6_refGene.txt
+
+#Next, use annovar to build the gene database:
+module load annovar/4.19
+retrieve_seq_from_fasta.pl dm6nr_refGene.txt -seqfile dm6nr_seq/dm6nr_ancestral_dmel-all-chromosome-r6.14.fa -format refGene -outfile dm6nr_refGeneMrna.fa
+
+```
+
+##Annotate the VCFs.
+###Non-redundant version.
+```{R, engine='bash'}
+
+module load annovar/4.19
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants
+FILE=NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.vcf
+
+table_annovar.pl $FILE /share/rdata/ramon.pouso/reference/indexed_reference/annovar_database/nr_ancestral_dm6 -vcfinput --outfile ${FILE/.vcf/.nr_annovar} -buildver dm6nr --protocol refGene --operation g
+
+```
+
+
+#7. Carry out SIFT annotation:
+##Install the programme and download the database.
+```{R, engine='bash'}
+
+#This chunk doesn't need to be repeated; do not run it unless the files were removed.
+
+<!-- https://sift.bii.a-star.edu.sg/sift4g/SIFT4G_codes.html -->
+<!-- https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB#DBfromGTF -->
+
+<!-- #I'm following instructions from https://sift.bii.a-star.edu.sg/sift4g/Commandline.html -->
+
+<!-- mkdir -p /share/rdata/ramon.pouso/reference/indexed_reference/sift_database/ -->
+<!-- cd /share/rdata/ramon.pouso/reference/indexed_reference/sift_database/ -->
+
+<!-- #First download and uncompress the database. -->
+<!-- wget https://sift.bii.a-star.edu.sg/sift4g/public//Drosophila_melanogaster/BDGP6.83.zip --no-check-certificate -->
+<!-- jar xf BDGP6.83.zip #The unzipped folder will have three files for each chromosome: a compressed chromosome file (.gz); a regions file (.regions); a chromosome statistics file (.txt). -->
+
+<!-- #Then download the jar file to execute the programme. -->
+<!-- wget -P /share/rdata/ramon.pouso https://github.com/pauline-ng/SIFT4G_Annotator/raw/master/SIFT4G_Annotator.jar -->
+
+```
+
+##Generate custom ancestral drosophila database:
+```{R, engine='bash'}
+
+#This chunk doesn't need to be repeated; do not run it unless the files were removed.
+
+#I'm following instructions from: https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB#DBfromGTF
+
+#The following commented lines don't need to be processed again:
+<!-- #First, install sift4g: -->
+<!-- cd $LUSTRE -->
+<!-- mkdir -p sift4g_annotation -->
+<!-- cd sift4g_annotation -->
+<!-- git clone --recursive https://github.com/rvaser/sift4g.git sift4g -->
+<!-- cd sift4g/ -->
+<!-- make -->
+
+<!-- #Next download the UniProt ref90 protein database: -->
+<!-- cd /mnt/lustre/scratch/home/uvi/bg/dkr/sift4g_annotation/sift_prot_db -->
+<!-- wget https://ftp.uniprot.org/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz -->
+<!-- gunzip uniref90.fasta.gz -->
+
+<!-- #Next, copy the database-builder scripts: -->
+<!-- git clone https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB.git scripts_to_build_SIFT_db -->
+<!-- cd scripts_to_build_SIFT_db/test_files/ -->
+
+<!-- #Edit the target species config file: -->
+<!-- scp homo_sapiens-test.txt nr_ancestral_dm6.config.txt -->
+<!-- nano nr_ancestral_dm6.config.txt #edit each of the following fields following instructions from https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB#configFile: -->
+<!-- PARENT_DIR=/mnt/lustre/scratch/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/test_files/nr_ancestral_dm6 -->
+<!-- ORG=ancestral_drosophila_melanogaster -->
+<!-- ORG_VERSION=nr_ancestral_dm6 -->
+<!-- SIFT4G_PATH=/mnt/lustre/scratch/home/uvi/bg/dkr/sift4g_annotation/sift4g/bin/sift4g -->
+<!-- PROTEIN_DB=/mnt/lustre/scratch/home/uvi/bg/dkr/sift4g_annotation/sift_prot_db/uniref90.fasta -->
+<!-- MITO_GENETIC_CODE_TABLE=5 -->
+<!-- MITO_GENETIC_CODE_TABLENAME=Invertebrate Mitochondrial -->
+
+<!-- #Create directory for the target species, and copy the target species files (reference fasta and annotation file): -->
+<!-- mkdir -p nr_ancestral_dm6 -->
+<!-- cd nr_ancestral_dm6 -->
+<!-- #Put genomic fasta file in chr-src, and split it by chromosome: -->
+<!-- mkdir -p chr-src -->
+
+#First copy the old database and rename it as "old_nr_ancestral_dm6" so that new changes don't overwrite the original content (very slow!!!):
+cd $LUSTRE/sift4g_annotation/scripts_to_build_SIFT_db/test_files
+scp -pr nr_ancestral_dm6 old_nr_ancestral_dm6
+
+#Next, edit all paths within the config file (since everything is now in CESGA FT3 rather than FT2, the path is a bit different and "nlsas/" needs to be added after "scratch/")
+nano nr_ancestral_dm6.config.txt #edit
+
+#Copy the new genomic fasta file to chr-src, and split it by chromosome:
+cd nr_ancestral_dm6
+scp -p ramon.pouso@rua2.uvigo.es://share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa.gz chr-src/
+cd chr-src/
+gunzip ancestral_dmel-all-chromosome-r6.14.fa.gz
+awk 'BEGIN {O="";} /^>/ { O=sprintf("%s.fa",substr($0,2));} {if(O!="") print >> O;}' ancestral_dmel-all-chromosome-r6.14.fa
+rm ancestral_dmel-all-chromosome-r6.14.fa
+rm *.gz #delete the old files
+#Put gene annotation file in gene-annotation-src:
+cd ..
+mkdir -p gene-annotation-src
+scp -p ramon.pouso@rua2.uvigo.es://share/rdata/ramon.pouso/reference/indexed_reference/dm6nr.refGene.gtf gene-annotation-src/
+gunzip gene-annotation-src/dm6nr.refGene.gtf.gz
+awk -F"\t" '{OFS = FS} { gsub(/chr/,"", $1); print }' gene-annotation-src/dm6nr.refGene.gtf | gzip > gene-annotation-src/dm6nr.refGene.gtf.gz #remove the "chr" part from the chromosome names in the .gtf file, since it's using a different nomenclature than the .fa file and it was crashing the programme.
+rm gene-annotation-src/dm6nr.refGene.gtf
+
+#Next remove the files and folders which will be redone:
+cd /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/test_files/nr_ancestral_dm6
+rm -r SIFT_predictions
+rm -r singleRecords*
+rm -r nr_ancestral_dm6
+rm -r subst/
+rm -r fasta/
+rm all_prot.fasta
+rm *log
+rm Log2.txt
+
+******************>
+
+cd /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db
+
+#Finally, build the database using the following command:
+sbatch make-SIFT-db-all.sh #But first store in make-SIFT-db-all.sh the following lines:
+
+#!/bin/bash
+#SBATCH -p thinnodes
+#SBATCH -n 2
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --mem-per-cpu=10GB
+#SBATCH -J make-SIFT-db-all
+#SBATCH -o make-SIFT-db-all_%A.out
+#SBATCH -t 16:00:00 # execution time
+#SBATCH --mail-type=TIME_LIMIT_80
+#SBATCH --mail-user=dkmanruiz@gmail.com
+cd /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db
+perl make-SIFT-db-all.pl -config /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/test_files/nr_ancestral_dm6.config.txt
+
+#I encountered this bug: https://github.com/rvaser/sift4g/issues/10 and edited the code as suggested here. However I kept running into the same problem until I realised that the programme doesn't remove the all_prot.fasta file, so it keeps appending the wrong sequences. Notwithstanding, even after manually removing it, I kept running into the alignment issues. So I posted a message in the linked issue, and followed rvaser's instructions over there.
+
+#Since the first steps of the pipeline are working fine and don't need to be repeated, I downloaded https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB/files/3877234/make-SIFT-db-starting_from_SIFT4G.pl.txt and used this script for subsequent attempts:
+sbatch make-SIFT-db-starting_from_SIFT4G.sh #But first store in make-SIFT-db-starting_from_SIFT4G.sh the following lines:
+
+#!/bin/bash
+#SBATCH -p thinnodes
+#SBATCH -n 2 --ntasks-per-node=1 --cpus-per-task=24
+#SBATCH --mem-per-cpu=10GB
+#SBATCH -J make-SIFT-db-starting_from_SIFT4G
+#SBATCH -o make-SIFT-db-starting_from_SIFT4G_%A.out
+#SBATCH -t 16:00:00 # execution time
+#SBATCH --mail-type=TIME_LIMIT_80
+#SBATCH --mail-user=dkmanruiz@gmail.com
+cd /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/
+perl make-SIFT-db-starting_from_SIFT4G.pl.txt -config /mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/test_files/nr_ancestral_dm6.config.txt
+
+#Next I kept running into some extra errors while populating the databases, so I posted yet another issue: https://github.com/pauline-ng/SIFT4G_Create_Genomic_DB/issues/53 . According to Pauline, these error messages matter not.
+
+```
+
+##Run the programme:
+####nr version:
+#####Upload the VCFs and the SIFT4G jar file to CESGA:
+```{R, engine='bash'}
+
+cd /mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/
+
+#In CESGA, create the destination folders:
+mkdir -p annotation/proyecto_rescate/
+
+#From the cluster, copy the following files:
+##ANNOVAR-annotated VCF:
+scp -p /share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf uvibgdkr@ft3.cesga.es://mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/annotation/proyecto_rescate/
+##SIFT4G jar file:
+#scp -p /share/rdata/ramon.pouso/sift4g/SIFT4G_Annotator_v2.4.jar uvibgdkr@ft3.cesga.es://mnt/lustre/scratch/nlsas/home/uvi/bg/dkr/sift4g_annotation/sift4g/
+
+```
+
+#####Annotate the files:
+```{R, engine='bash'}
+
+#Launch it as follows for each VCF (don't copy them from here to the terminal; invisible spaces will break it):
+cd /mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/annotation/proyecto_rescate/
+java -jar /mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/sift4g/SIFT4G_Annotator_v2.4.jar -c -t -i NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf -d /mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/scripts_to_build_SIFT_db/test_files/nr_ancestral_dm6/nr_ancestral_dm6/ -r ./
+
+#If this doesn't work from the standard interactive shell in CESGA, then request dedicated interactive nodes, and run the former core from there. E.g.: compute -c 2 --mem 20
+
+```
+
+#####Download the VCFs from CESGA:
+```{R, engine='bash'}
+
+#From the cluster, copy the following files:
+scp -p uvibgdkr@ft3.cesga.es://mnt/netapp2/Store_uni/home/uvi/bg/dkr/sift4g_annotation/annotation/proyecto_rescate/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno_SIFT* /share/rdata2/dani_k/proyecto_rescate/variants/
+
+```
+
+##Analyse the output:
+###Default thresholds:
+```{bash}
+
+#It's important to select the relevant annotation per site when there is more than one. Extract the name of the gene from the annovar part, then also from the sift part, and keep only the matching one!
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+VCF=NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno_SIFTpredictions.vcf
+
+#One entry: 
+grep -v '^#' $VCF | grep 'nonsynonymous_SNV' | grep 'SIFT' | awk '!($5 ~ ",")' | awk -F";Gene\\\\.refGene=|;GeneDetail\\\\.refGene=|;AAChange\\\\.refGene=|;ALLELE_END|;SIFTINFO=|\t" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2-1,$2,$9,$11,$13)}' | awk 'BEGIN{FS=OFS="\t"} {gsub(":","_", $4);gsub("\\(","_");gsub("\\)","_");print}' | awk -F"\t|:" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5,$10)}' | grep -v "," > ${VCF/.vcf/.clean.txt}
+#Multiple entries:
+grep -v '^#' $VCF | grep 'nonsynonymous_SNV' | grep 'SIFT' | awk '!($5 ~ ",")' | awk -F";Gene\\\\.refGene=|;GeneDetail\\\\.refGene=|;AAChange\\\\.refGene=|;ALLELE_END|;SIFTINFO=|\t" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2-1,$2,$9,$11,$13)}' | awk 'BEGIN{FS=OFS="\t"} {gsub(":","_", $4);gsub("\\(","_");gsub("\\)","_");print}' | awk -F"\t|:" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5,$10)}' | grep "," | sed 's/,/\t/g' | awk '{for(i=6;i<=NF;i++){if($i ~ $5){printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5,$i)}}}' >> ${VCF/.vcf/.clean.txt}
+
+
+#Classify the mutations in deleterious and tolerated categories:
+module load gcc/7.2.0
+module add gcc/7.2.0
+grep "DELETERIOUS" ${VCF/.vcf/.clean.txt} | bedtools sort > NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_deleterious.bed #2231 (18.4% of the total 12110) 
+grep "TOLERATED" ${VCF/.vcf/.clean.txt} | bedtools sort > NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_tolerated.bed #9842 (81.3% of the total 12110 nonsynonymous) 
+
+#Check genes with parentheses:
+#grep -v '^#' $VCF | grep 'synonymous_SNV' | grep 'SIFT' | awk -F";Gene\\\\.refGene=|;GeneDetail\\\\.refGene=|;AAChange\\\\.refGene=|;ALLELE_END|;SIFTINFO=|\t" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2-1,$2,$9,$11,$13)}' | awk -F"\t" '{gsub(/:/,"_", $4); print}' | awk -F"\t|:" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5,$10)}' | awk '$5 ~ "\\("' | grep "," | sed 's/,/\t/g' | awk -F"\t" '{gsub("\\(","_");gsub("\\)","_");print}' | awk '{for(i=6;i<=NF;i++){if($i ~ $5){printf ("%s\t%s\t%s\t%s\t%s\t%s\n", $1,$2,$3,$4,$5,$i)}}}' | less -S
+
+```
+
+
+#8. Carry out PROVEAN annotation.
+##README.
+```{bash}
+
+#We'll be using the provean output from the slow inbreeding project (all_sites_pipeline.Rmd). We're already analysing only sites from that project.
+
+```
+
+##Extract the current subset of PROVEAN annotations.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+mkdir -p /share/rdata2/dani_k/proyecto_rescate/variants/provean/
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+bedtools intersect -a /share/rdata/ramon.pouso/POOLS/all_gens_0_140/variants/provean/missense_variants_provean_scores_deleterious.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf > provean/missense_variants_provean_scores_deleterious.bed #1739 (14.3% of the total 12110)
+bedtools intersect -a /share/rdata/ramon.pouso/POOLS/all_gens_0_140/variants/provean/missense_variants_provean_scores_tolerated.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf > provean/missense_variants_provean_scores_tolerated.bed
+#10255 (84.7% of the total 12110)
+
+```
+
+
+#9. Carry out 4-fold annotation.
+##README.
+```{bash}
+
+#We'll be using the output from the slow inbreeding project (all_sites_pipeline.Rmd). We're already analysing only sites from that project.
+
+```
+
+##Extract the current subset of 4-fold annotations.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+mkdir -p /share/rdata2/dani_k/proyecto_rescate/variants/4fold/
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+bedtools intersect -a /share/rdata/ramon.pouso/4fold/pools_gen0-140_synonymous_variants_4fold.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf > 4fold/synonymous_variants_4fold.bed #22777
+
+```
+
+
+#10. Carry out recombination annotation.
+##Copy and unzip the programmes.
+```{bash}
+
+#This section doesn't need to be repeated.
+
+<!-- #From outside the server, copy to the server the two necessary programmes, which Humberto sent me by e-mail: -->
+
+<!-- scp /Users/dani/Downloads/coordinates_converter.zip ramon.pouso@rua2.uvigo.es://share/rdata/ramon.pouso/recombination/ -->
+<!-- scp /Users/dani/Downloads/RRC2.zip ramon.pouso@rua2.uvigo.es://share/rdata/ramon.pouso/recombination/ -->
+
+<!-- #From inside the server, then unzip both files and their contents, and rename folders. This will be the path: -->
+<!-- cd /share/rdata/ramon.pouso/recombination/ -->
+
+```
+
+##Convert coordinates from the RRC files from dm5 to dm6:
+```{bash}
+
+#This section doesn't need to be repeated.
+
+<!-- #Convert the RRC comeron coordinates to the format required by the coordinate converter: -->
+<!-- cd /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables -->
+<!-- mkdir -p dm5 -->
+<!-- mv Comeron_100kb_chr*.txt dm5 -->
+<!-- cd dm5 -->
+<!-- FILES=$(ls Comeron_100kb_chr*.txt | grep -v "chr4" | grep -v 'dm') -->
+<!-- for file in ${FILES[@]} -->
+<!--   do -->
+<!--   echo $file -->
+<!--   FILENAME=$(echo $file | cut -d'_' -f3 | cut -d'.' -f1 | sed "s/chr//g") -->
+<!--   awk -v chr=$FILENAME '{printf ("%s:%s..%s\t%s\n",chr,$1,$1+99999,$2)}' <(head -n -1 $file) > ${file/.txt/.dm5.txt} -->
+<!--   awk -v chr=$FILENAME '{printf ("%s\t%s\t%s\t%s\n",chr,$1,$1+99999,$2)}' <(head -n -1 $file) > ${file/.txt/.dm5.bed} -->
+<!--   done -->
+
+<!-- #Then save them in a file and use the following script to obtain the v5 to v6 conversion: -->
+<!-- mkdir -p /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables/dm6 -->
+<!-- FILES=$(ls Comeron_100kb_chr*.txt | grep -v "chr4" | grep -v 'dm') -->
+<!-- for file in ${FILES[@]} -->
+<!--   do -->
+<!--   echo ${file/.txt/.dm5.txt} -->
+<!--   new_name=$(echo ${file/.txt/.dm5_to_dm6.txt}) -->
+<!--   cut -f1 ${file/.txt/.dm5.txt} | /share/rdata/ramon.pouso/recombination/coordinates_converter/bulkfile-scripts-master/dmel_r5_to_r6/dmel_r5_to_r6_converter.pl > /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables/dm6/$new_name -->
+<!--   grep -v '^#' /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables/dm6/$new_name | awk -F":|\\\\.\\\\.|\t" '{printf ("%s\t%s\t%s\t%s\t%s\t%s\n",$1,$2,$3,$4,$5,$6)}' > /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables/dm6/${new_name/.txt/.bed} -->
+<!--   done -->
+
+<!-- #Next use bedtools intersect to cross the file with old coordinates and recombination values with the file with both old and new coordinates: -->
+<!-- cd /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables -->
+<!-- module load gcc/7.2.0 -->
+<!-- module add gcc/7.2.0 -->
+<!-- FILES=$(ls dm5/Comeron_100kb_chr*.dm5.bed | grep -v "chr4" | cut -d'/' -f2) -->
+<!-- for file in ${FILES[@]} -->
+<!--   do -->
+<!--   bedtools intersect -a dm5/$file -b dm6/${file/.dm5.bed/.dm5_to_dm6.bed} -wa -wb | awk -F"\t" '{printf ("%s\t%s\t%s\t%s\n",$8,$9,$10,$4)}' > dm6/${file/.dm5.bed/.dm6.bed} -->
+<!--   cut -f2,4 dm6/${file/.dm5.bed/.dm6.bed} > ${file/.dm5.bed/.txt} -->
+<!--   done -->
+<!-- cat dm6/Comeron_100kb_chr*.dm6.bed > dm6/Comeron_100kb_allchr.dm6.bed -->
+
+<!-- #Later on I realised that there are 1-base gaps between all bins (because bedtools works with 0-based coordinates), so use this to fix it: -->
+<!-- awk '{printf ("%s\t%s\t%s\t%s\n",$1,$2-1,$3,$4)}' dm6/Comeron_100kb_allchr.dm6.bed > dm6/Comeron_100kb_allchr.dm6.0based.bed -->
+
+```
+
+##Retrieve recombination value for each SNP:
+```{bash}
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+FILE=NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf
+grep -v '^#' $FILE | awk -F"\t" '{printf ("%s\t%s\t%s\n",$1,$2-1,$2)}' > ${FILE/.vcf/.bed}
+FILE=${FILE/.vcf/.bed}
+bedtools intersect -a $FILE -b /share/rdata/ramon.pouso/recombination/RRC2/Comeron_tables/dm6/Comeron_100kb_allchr.dm6.0based.bed -wb | awk -F"\t" '{printf ("%s\t%s\t%s\t%s\n",$1,$2,$3,$7)}' > ${FILE/.bed/.recombination.bed}
+
+#Retrieve high recombination and low recombination quartiles.
+TOTAL=$(wc -l < ${FILE/.bed/.recombination.bed})
+QUARTILE=$((TOTAL/4))
+
+shuf ${FILE/.bed/.recombination.bed} | sort -k4,4n | head -n$QUARTILE | sort -k1,1 -k2,2n > ${FILE/.bed/.low_recombination.bed}
+shuf ${FILE/.bed/.recombination.bed} | sort -k4,4n | tail -n$QUARTILE | sort -k1,1 -k2,2n > ${FILE/.bed/.high_recombination.bed}
+
+```
+
+
+#11. Combine and import all annotations into the VCF.
+##Process and combine SIFT and Provean output.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+mkdir -p /share/rdata2/dani_k/proyecto_rescate/counts
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+#Both tolerated:
+bedtools intersect -a provean/missense_variants_provean_scores_tolerated.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_tolerated.bed | awk '{printf ("%s\t%s\t%s\t%s\n", $1,$2,$3,$4)}' > ../counts/missense_variants_provean_SIFT_tolerated.bed
+wc -l < ../counts/missense_variants_provean_SIFT_tolerated.bed #9051
+#Both deleterious:
+bedtools intersect -a provean/missense_variants_provean_scores_deleterious.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_deleterious.bed | awk '{printf ("%s\t%s\t%s\t%s\n", $1,$2,$3,$4)}' > ../counts/missense_variants_provean_SIFT_deleterious.bed #1025
+wc -l < ../counts/missense_variants_provean_SIFT_deleterious.bed
+#PROV tol, SIFT del:
+bedtools intersect -a provean/missense_variants_provean_scores_tolerated.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_deleterious.bed | wc -l #1181
+#SIFT tol, PROV del:
+bedtools intersect -a provean/missense_variants_provean_scores_deleterious.bed -b NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.missense_variants_SIFT_scores_tolerated.bed | wc -l #707
+
+```
+
+##Import all annotations into the VCF.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+
+cd /share/rdata2/dani_k/proyecto_rescate/variants/
+
+VCF=NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.vcf
+
+rm ${VCF/vcf/custom_unsorted.vcf}
+#Fourfold:
+bedtools intersect -a $VCF -b 4fold/synonymous_variants_4fold.bed | awk '{gsub(";ALLELE_END",";ALLELE_END;CUSTOM=fourfold"); print}' >> ${VCF/vcf/custom_unsorted.vcf}
+#Tolerated:
+bedtools intersect -a $VCF -b ../counts/missense_variants_provean_SIFT_tolerated.bed | awk '{gsub(";ALLELE_END",";ALLELE_END;CUSTOM=tolerated"); print}' >> ${VCF/vcf/custom_unsorted.vcf}
+#Deleterious:
+bedtools intersect -a $VCF -b ../counts/missense_variants_provean_SIFT_deleterious.bed | awk '{gsub(";ALLELE_END",";ALLELE_END;CUSTOM=deleterious"); print}' >> ${VCF/vcf/custom_unsorted.vcf}
+#LoF:
+grep -E ';ExonicFunc.refGene=stopgain;|;ExonicFunc.refGene=stoploss;' $VCF | awk '{gsub(";ALLELE_END",";ALLELE_END;CUSTOM=LoF"); print}' >> ${VCF/vcf/custom_unsorted.vcf}
+
+#Sort the VCF and add the headers:
+cat <(grep "^#" $VCF) <(sort -k1,1 -k2,2n ${VCF/vcf/custom_unsorted.vcf}) > ${VCF/vcf/custom.vcf}
+sed -i 's/#CHROM/##INFO=<ID=CUSTOM,Number=1,Type=String,Description="Custom annotation field">\n#CHROM/' ${VCF/vcf/custom.vcf}
+
+```
+
+#12. Split the VCFs:
+##At the individual level:
+###Exclude AF=0:
+####All sites:
+#####split_individuals.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+module load bcftools/1.9
+
+VCF=$1
+
+INDIVIDUALS=$(bcftools query -l "${VCF}")
+for i in ${INDIVIDUALS[@]}
+  do
+  echo "${i}"
+  ID=$(echo "${i}")
+  java -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:+UseStringDeduplication -Xmx4g -jar /share/apps/GATK/4.1.4/gatk-package-4.1.4.0-local.jar SelectVariants \
+  -R /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa \
+  -V "${VCF}" \
+  -O "${i}"_individual.vcf \
+  --exclude-non-variants \
+  -sn $ID
+  done
+  
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/split_individuals.sh
+
+```
+
+#####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCF=/share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.custom.vcf
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/split_individuals.sh $VCF
+
+```
+
+####Low/High recombination sites:
+```{R, engine='bash'}
+
+REC=high #low #high
+
+module load gcc/7.2.0 
+module add gcc/7.2.0
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+INDIVIDUALS=$(ls *_individual.vcf)
+for i in ${INDIVIDUALS[@]}
+  do
+  echo "${i}"
+  bedtools intersect -a ${i} -b /share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.${REC}_recombination.bed > ${i/.vcf/.${REC}_recombination.vcf}
+  done
+
+```
+
+####Filter-in singletons only:
+```{R, engine='bash'}
+
+#Run the population version first in order to obtain the per-population singletons (see below).
+
+module load gcc/7.2.0 
+module add gcc/7.2.0
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+INDIVIDUALS=$(ls *_individual.vcf)
+for i in ${INDIVIDUALS[@]}
+  do
+  echo "${i}"
+  POP=$(echo $i | cut -c1)
+  bedtools intersect -a ${i} -b ${POP}_population.singletons.bed > ${i}_individual.singletons.vcf
+  done
+
+```
+
+##At the population level:
+###Exclude AF=0:
+####All sites:
+#####split_populations.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+module load bcftools/1.9
+
+VCF=$1
+
+POPULATIONS=$(bcftools query -l "${VCF}" | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo "${pop}"
+  bcftools query -l "${VCF}" | grep "${pop}" > "${pop}"_population_individual_list.txt
+  java -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:+UseStringDeduplication -Xmx4g -jar /share/apps/GATK/4.1.4/gatk-package-4.1.4.0-local.jar SelectVariants \
+  -R /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa \
+  -V "${VCF}" \
+  -O "${pop}"_population.vcf \
+  $(for ind in $(cat "${pop}"_population_individual_list.txt); do echo "-sn $ind"; done) \
+  --exclude-non-variants
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/split_populations.sh
+
+```
+
+#####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCF=/share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.custom.vcf
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/split_populations.sh $VCF
+
+```
+
+####Filter-in singletons only:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+POPULATIONS=$(ls *_population.vcf | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo $pop
+  #grep ";AC=1;" ${pop}_population.vcf > ${pop}_population.singletons.vcf
+  grep ";AC=1;" ${pop}_population.vcf | awk '{printf ("%s\t%s\t%s\n"),$1,$2-1,$2}' > ${pop}_population.singletons.bed
+  done
+
+```
+
+###Include AF=0:
+####All sites:
+#####split_populations_keep_af0.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+module load bcftools/1.9
+
+VCF=$1
+
+POPULATIONS=$(bcftools query -l "${VCF}" | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo "${pop}"
+  #bcftools query -l "${VCF}" | grep "${pop}" > "${pop}"_population_individual_list.txt
+  java -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:+UseStringDeduplication -Xmx4g -jar /share/apps/GATK/4.1.4/gatk-package-4.1.4.0-local.jar SelectVariants \
+  -R /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa \
+  $(for ind in $(cat "${pop}"_population_individual_list.txt); do echo "-sn $ind"; done) \
+  -V "${VCF}" \
+  -O "${pop}"_population_with_af0.vcf
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_keep_af0.sh
+
+```
+
+#####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCF=/share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.orthologs.confident.masked.bcf_filtered.DP_filtered.hard_filtered.slow_inbreeding_snp_set.polarized.nr_annovar.dm6nr_multianno.custom.vcf
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_keep_af0.sh $VCF
+
+```
+
+
+###Alternative VCF including neutral regions; exclude AF=0:
+####All sites:
+#####split_populations_wg.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+module load bcftools/1.9
+
+VCF=$1
+
+POPULATIONS=$(bcftools query -l "${VCF}" | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo "${pop}"
+  #bcftools query -l "${VCF}" | grep "${pop}" > "${pop}"_population_individual_list.txt
+  java -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:+UseStringDeduplication -Xmx4g -jar /share/apps/GATK/4.1.4/gatk-package-4.1.4.0-local.jar SelectVariants \
+  -R /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa \
+  -V "${VCF}" \
+  -O "${pop}"_population_wg.vcf \
+  $(for ind in $(cat "${pop}"_population_individual_list.txt); do echo "-sn $ind"; done) \
+  --exclude-non-variants
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_wg.sh
+
+```
+
+#####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCF=/share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.w-g.confident.masked.bcf_filtered.hard_filtered.vcf
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_wg.sh $VCF
+
+```
+
+####Calculate Tajima's D:
+```{R, engine='bash'}
+
+module load vcftools/0.1.17
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCFLIST=$(ls *"_population_wg.vcf")
+CHRLIST=$(cut -f1 /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.length.txt | head -n4)
+for VCF in ${VCFLIST[@]}
+  do
+  echo $VCF
+  for chr in ${CHRLIST[@]}
+    do
+    echo $chr
+    grep '^#' $VCF > ${VCF/.vcf/.$chr.vcf}
+    grep -v '^#' $VCF | awk -v CHR=$chr '$1==CHR' >> ${VCF/.vcf/.$chr.vcf}
+    N_SNPS=$(awk -v CHR=$chr '$1==CHR' /share/rdata/ramon.pouso/reference/indexed_reference/dmel-all-chromosome-r6.14.length.txt | cut -f2)
+    vcftools --vcf ${VCF/.vcf/.$chr.vcf} --TajimaD $N_SNPS --out ${VCF/.vcf/.$chr.out}
+    done
+  done
+
+```
+
+####Filter-in singletons only:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+POPULATIONS=$(ls *_population_wg.vcf | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo $pop
+  grep "AC=1;" ${pop}_population_wg.vcf > ${pop}_population_wg.singletons.vcf
+  done
+
+wc -l < N_population_wg.singletons.vcf #14390
+wc -l < R_population_wg.singletons.vcf #845
+
+```
+
+###Alternative VCF keeping all biallelic SNPs; exclude AF=0:
+####All sites:
+#####split_populations_w-g.raw_snps.sh
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+module load java/jre/1.8.0_73
+module load GATK/4.1.4
+module load bcftools/1.9
+
+VCF=$1
+
+POPULATIONS=$(bcftools query -l "${VCF}" | cut -c1 | sort | uniq)
+for pop in ${POPULATIONS[@]}
+  do
+  echo "${pop}"
+  #bcftools query -l "${VCF}" | grep "${pop}" > "${pop}"_population_individual_list.txt
+  java -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:+UseStringDeduplication -Xmx4g -jar /share/apps/GATK/4.1.4/gatk-package-4.1.4.0-local.jar SelectVariants \
+  -R /share/rdata/ramon.pouso/reference/indexed_reference/ancestral_dmel-all-chromosome-r6.14.fa \
+  -V "${VCF}" \
+  -O "${pop}"_population_w-g.raw_snps.vcf \
+  $(for ind in $(cat "${pop}"_population_individual_list.txt); do echo "-sn $ind"; done) \
+  --exclude-non-variants
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_w-g.raw_snps.sh
+
+```
+
+#####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+VCF=/share/rdata2/dani_k/proyecto_rescate/variants/NRall_autosomes.w-g.raw_snps.vcf
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/split_populations_w-g.raw_snps.sh $VCF
+
+```
+
+#13. Retrieve counts.
+##Total observed counts.
+###All sites:
+####individual_counts.sh:
+```{R, engine='bash'}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+rm counts_individual_NR_summary.txt
+echo -e "sample\tpopulation\tfourfold_V\tfourfold_D\ttolerated_V\ttolerated_D\tdeleterious_V\tdeleterious_D\tLoF_V\tLoF_D" > counts_individual_NR_summary.txt
+INDLIST=$(ls *"_individual.vcf")
+for i in ${INDLIST[@]}
+  do
+  echo ${i}
+  SAMPLE=$(echo "${i}" | cut -d'_' -f1)
+  echo $SAMPLE
+  POPULATION=$(echo $SAMPLE | cut -c1)
+  FOURFOLD_V=$(grep "CUSTOM=fourfold;" $i | wc -l)
+  FOURFOLD_D=$(grep "CUSTOM=fourfold;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  MISTOL_V=$(grep "CUSTOM=tolerated;" $i | wc -l)
+  MISTOL_D=$(grep "CUSTOM=tolerated;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  MISDEL_V=$(grep "CUSTOM=deleterious;" $i | wc -l)
+  MISDEL_D=$(grep "CUSTOM=deleterious;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  LOF_V=$(grep "CUSTOM=LoF;" $i | wc -l)
+  LOF_D=$(grep "CUSTOM=LoF;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  echo -e "$SAMPLE\t$POPULATION\t$FOURFOLD_V\t$FOURFOLD_D\t$MISTOL_V\t$MISTOL_D\t$MISDEL_V\t$MISDEL_D\t$LOF_V\t$LOF_D" >> counts_individual_NR_summary.txt
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/individual_counts.sh
+
+```
+
+####Send the array job:
+```{R, engine='bash'}
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/individual_counts.sh
+
+```
+
+####Download the file:
+```{R, engine='bash'}
+
+#From the local environment:
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/counts_individual_NR_summary.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+###Low/High recombination subset:
+####individual_counts_recombination.sh:
+```{R, engine='bash'}
+
+RECOMBINATION=$1
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+rm counts_individual_NR_summary.${RECOMBINATION}_recombination.txt
+echo -e "sample\tpopulation\tfourfold_V\tfourfold_D\ttolerated_V\ttolerated_D\tdeleterious_V\tdeleterious_D\tLoF_V\tLoF_D" > counts_individual_NR_summary.${RECOMBINATION}_recombination.txt
+INDLIST=$(ls *"individual.${RECOMBINATION}_recombination.vcf")
+for i in ${INDLIST[@]}
+  do
+  echo ${i}
+  SAMPLE=$(echo "${i}" | cut -d'_' -f1)
+  echo $SAMPLE
+  POPULATION=$(echo $SAMPLE | cut -c1)
+  FOURFOLD_V=$(grep "CUSTOM=fourfold;" $i | wc -l)
+  FOURFOLD_D=$(grep "CUSTOM=fourfold;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  MISTOL_V=$(grep "CUSTOM=tolerated;" $i | wc -l)
+  MISTOL_D=$(grep "CUSTOM=tolerated;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  MISDEL_V=$(grep "CUSTOM=deleterious;" $i | wc -l)
+  MISDEL_D=$(grep "CUSTOM=deleterious;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  LOF_V=$(grep "CUSTOM=LoF;" $i | wc -l)
+  LOF_D=$(grep "CUSTOM=LoF;" $i | awk -F";AC=|;AF=" '{printf ("%s\n"),$2}' | paste -sd+ | bc)
+  echo -e "$SAMPLE\t$POPULATION\t$FOURFOLD_V\t$FOURFOLD_D\t$MISTOL_V\t$MISTOL_D\t$MISDEL_V\t$MISDEL_D\t$LOF_V\t$LOF_D" >> counts_individual_NR_summary.${RECOMBINATION}_recombination.txt
+  done
+
+#Save this code as: /share/rdata2/dani_k/proyecto_rescate/counts/individual_counts_recombination.sh
+
+```
+
+####Send the array job:
+```{R, engine='bash'}
+
+RECOMBINATION="high" #low #high
+
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+qsub -cwd -l h=compute-0-4 /share/rdata2/dani_k/proyecto_rescate/counts/individual_counts_recombination.sh $RECOMBINATION
+
+```
+
+Download the file:
+```{R, engine='bash'}
+
+#From the local environment:
+RECOMBINATION="low" #low #high
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/counts_individual_NR_summary.${RECOMBINATION}_recombination.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+##Singletons.
+###Population level:
+```{R, engine='bash'}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+rm singletons_population_NR_summary.txt
+echo -e "population\tfourfold_S\ttolerated_S\tdeleterious_S\tLoF_S" > singletons_population_NR_summary.txt
+POPLIST=$(ls *"_population.singletons.vcf")
+for pop in ${POPLIST[@]}
+  do
+  echo ${pop}
+  POPULATION=$(echo $pop | cut -c1)
+  FOURFOLD_S=$(grep "CUSTOM=fourfold;" $pop | wc -l)
+  MISTOL_S=$(grep "CUSTOM=tolerated;" $pop | wc -l)
+  MISDEL_S=$(grep "CUSTOM=deleterious;" $pop | wc -l)
+  LOF_S=$(grep "CUSTOM=LoF;" $pop | wc -l)
+  echo -e "$POPULATION\t$FOURFOLD_S\t$MISTOL_S\t$MISDEL_S\t$LOF_S" >> singletons_population_NR_summary.txt
+  done
+
+#From the local environment:
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/singletons_population_NR_summary.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+###Individual level:
+```{R, engine='bash'}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+rm singletons_individual_NR_summary.txt
+echo -e "sample\tpopulation\tfourfold_S\ttolerated_S\tdeleterious_S\tLoF_S" > singletons_individual_NR_summary.txt
+INDLIST=$(ls *"_individual.singletons.vcf")
+for i in ${INDLIST[@]}
+  do
+  echo ${i}
+  SAMPLE=$(echo $i | cut -d'_' -f1)
+  POPULATION=$(echo $SAMPLE | cut -c1)
+  FOURFOLD_S=$(grep "CUSTOM=fourfold;" $i | wc -l)
+  MISTOL_S=$(grep "CUSTOM=tolerated;" $i | wc -l)
+  MISDEL_S=$(grep "CUSTOM=deleterious;" $i | wc -l)
+  LOF_S=$(grep "CUSTOM=LoF;" $i | wc -l)
+  echo -e "$SAMPLE\t$POPULATION\t$FOURFOLD_S\t$MISTOL_S\t$MISDEL_S\t$LOF_S" >> singletons_individual_NR_summary.txt
+  done
+
+#From the local environment:
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/singletons_individual_NR_summary.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+##SFS
+###Exclude AF=0:
+```{R, engine='bash'}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+module load bcftools/1.9
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+POPLIST=$(ls *"_population.vcf")
+for pop in ${POPLIST[@]}
+  do
+  #echo ${pop}
+  POPULATION=$(echo $pop | cut -c1)
+  N_IND=$(bcftools query -l $pop | wc -l)
+  CATEGORIES=$(grep -v "^#" $pop | cut -f8 | awk -F";CUSTOM=|;DP" '{print $2}' | sort -u)
+  for category in ${CATEGORIES[@]}
+    do
+    echo "working with population" $pop "and category" $category
+    rm ${POPULATION}_${category}_allele_count.txt
+    for i in $(seq 1 $(echo $((2*N_IND))))
+      do
+      awk -v cat="CUSTOM=${category};" '$0 ~ cat' $pop | awk -v freq=";AC=${i};" '$0 ~ freq' | wc -l >> ${POPULATION}_${category}_allele_count.txt
+      done
+    done
+  done
+
+N_POP_N_IND=$(bcftools query -l N_population.vcf | wc -l)
+for i in $(seq 1 $((2*N_POP_N_IND))); do printf 'N\t%s\n' "$i"; done > N_pop_rows_allele_count.txt
+R_POP_N_IND=$(bcftools query -l R_population.vcf | wc -l)
+for i in $(seq 1 $((2*R_POP_N_IND))); do printf 'R\t%s\n' "$i"; done > R_pop_rows_allele_count.txt
+echo -e "population\tderived_count\tfourfold\ttolerated\tdeleterious\tLoF" > NR_headers_allele_count.txt
+cat NR_headers_allele_count.txt <(paste N_pop_rows_allele_count.txt N_fourfold_allele_count.txt N_tolerated_allele_count.txt N_deleterious_allele_count.txt N_LoF_allele_count.txt) <(paste R_pop_rows_allele_count.txt R_fourfold_allele_count.txt R_tolerated_allele_count.txt R_deleterious_allele_count.txt R_LoF_allele_count.txt) > NR_SFS_allele_count.txt
+
+
+#From the local environment:
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/NR_SFS_allele_count.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+###Include AF=0:
+```{R, engine='bash'}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+module load bcftools/1.9
+cd /share/rdata2/dani_k/proyecto_rescate/counts
+
+POPLIST=$(ls *"_population_with_af0.vcf")
+for pop in ${POPLIST[@]}
+  do
+  #echo ${pop}
+  POPULATION=$(echo $pop | cut -c1)
+  N_IND=$(bcftools query -l $pop | wc -l)
+  CATEGORIES=$(grep -v "^#" $pop | cut -f8 | awk -F";CUSTOM=|;DP" '{print $2}' | sort -u)
+  for category in ${CATEGORIES[@]}
+    do
+    echo "working with population" $POPULATION "and category" $category
+    rm ${POPULATION}_${category}_allele_count_with_af0.txt
+    for i in $(seq 0 $(echo $((2*N_IND))))
+      do
+      awk -v cat="CUSTOM=${category};" '$0 ~ cat' $pop | awk -v freq=";AC=${i};" '$0 ~ freq' | wc -l >> ${POPULATION}_${category}_allele_count_with_af0.txt
+      done
+    done
+  done
+
+N_POP_N_IND=$(bcftools query -l N_population_with_af0.vcf | wc -l)
+for i in $(seq 0 $((2*N_POP_N_IND))); do printf 'N\t%s\n' "$i"; done > N_pop_rows_allele_count_with_af0.txt
+R_POP_N_IND=$(bcftools query -l R_population_with_af0.vcf | wc -l)
+for i in $(seq 0 $((2*R_POP_N_IND))); do printf 'R\t%s\n' "$i"; done > R_pop_rows_allele_count_with_af0.txt
+echo -e "population\tderived_count\tfourfold\ttolerated\tdeleterious\tLoF" > NR_headers_allele_count_with_af0.txt
+cat NR_headers_allele_count_with_af0.txt <(paste N_pop_rows_allele_count_with_af0.txt N_fourfold_allele_count_with_af0.txt N_tolerated_allele_count_with_af0.txt N_deleterious_allele_count_with_af0.txt N_LoF_allele_count_with_af0.txt) <(paste R_pop_rows_allele_count_with_af0.txt R_fourfold_allele_count_with_af0.txt R_tolerated_allele_count_with_af0.txt R_deleterious_allele_count_with_af0.txt R_LoF_allele_count_with_af0.txt) > NR_SFS_allele_count_with_af0.txt
+
+
+#From the local environment:
+scp ramon.pouso@rua2.uvigo.es://share/rdata2/dani_k/proyecto_rescate/counts/NR_SFS_allele_count_with_af0.txt /Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/
+
+```
+
+#14. Plot counts.
+##Derived count statistics:
+###Derived count ratios (relative to 4fold and non-rescued-average):
+####All sites:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+#Define variables and read raw counts file:
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+pool_counts <- read_tsv(paste0(wd_path,"counts_individual_NR_summary.txt"))
+pool_counts$population = factor(pool_counts$population)
+
+#Relativise by fourfold values:
+pool_counts_copies_4FR <- pool_counts %>% mutate(fourfold=fourfold_D/fourfold_D,tolerated=tolerated_D/fourfold_D,deleterious=deleterious_D/fourfold_D,LoF=LoF_D/fourfold_D) %>% select(!contains(c("_V","_D"))) %>% gather(ratio,value,-sample,-population,factor_key=T)
+pool_counts_copies_4FR
+
+#Obtain per population averages and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+average_pool_counts_copies_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_value"=character(0),"se_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_copies_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(pool_counts_copies_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(pool_counts_copies_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(pool_counts_copies_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_value","se_value")
+    average_pool_counts_copies_4FR <- rbind(average_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+  }
+}
+average_pool_counts_copies_4FR$ratio = factor(average_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_copies_4FR$population <- as.factor(average_pool_counts_copies_4FR$population)
+average_pool_counts_copies_4FR$avg_value <- as.double(average_pool_counts_copies_4FR$avg_value)
+average_pool_counts_copies_4FR$se_value <- as.double(average_pool_counts_copies_4FR$se_value)
+average_pool_counts_copies_4FR
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_copies_4FR$population)) {
+  for (r in unique(average_pool_counts_copies_4FR$ratio)) {
+    print(r)
+    r_average <- filter(average_pool_counts_copies_4FR,r==ratio & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_copies_4FR <- dplyr::mutate(average_pool_counts_copies_4FR, Nrel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_copies_4FR$ratio)) {
+  print(r)
+  for (p in unique(pool_counts_copies_4FR$population)) {
+    r_average <- filter(pool_counts_copies_4FR,ratio==r & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+    r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_copies_4FR,ratio==r & population=="N") %>% nrow()))
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_4FR <- mutate(pool_counts_copies_4FR, Nrel_value=value/r_average_vector)
+levels(relativised_pool_counts_copies_4FR$population) <- list("Non-R" = "N", "R-BP" = "R")
+
+#For the values relativised by the "N" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+bis_average_relativised_pool_counts_copies_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_Nrel_value"=character(0),"se_Nrel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_copies_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(relativised_pool_counts_copies_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_Nrel_value","se_Nrel_value")
+    bis_average_relativised_pool_counts_copies_4FR <- rbind(bis_average_relativised_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+  }
+}
+bis_average_relativised_pool_counts_copies_4FR$ratio = factor(bis_average_relativised_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+bis_average_relativised_pool_counts_copies_4FR$population <- as.factor(bis_average_relativised_pool_counts_copies_4FR$population)
+levels(bis_average_relativised_pool_counts_copies_4FR$population) <- list("Non-R" = "N", "R-BP" = "R")
+bis_average_relativised_pool_counts_copies_4FR$avg_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_4FR$avg_Nrel_value)
+bis_average_relativised_pool_counts_copies_4FR$se_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_4FR$se_Nrel_value)
+bis_average_relativised_pool_counts_copies_4FR
+
+
+
+#Average version:
+average_relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(population,avg_Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  #ylab("Derived count relative to\n 4fold and the mean of Non-R population") +
+  ylab("Relative derived count") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.78, 1.12)) +
+  #scale_shape_manual(values=c(1,16)) +
+  #ggtitle("Population means") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=12),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        axis.title.x=element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+average_relativised_pool_counts_copies_4FR_ggplot
+ggsave("NR_individual_avg_Nrelativised_counts_copies_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+
+#Average version, for the combined figure (see below):
+average_relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(population,avg_Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  #ylab("Derived count relative to\n 4fold and the mean of Non-R population") +
+  ylab("Relative derived count") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.78, 1.12)) +
+  scale_colour_manual(values=c("orange2","dodgerblue4")) +
+  #scale_shape_manual(values=c(1,16)) +
+  #ggtitle("Population means") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=12),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        axis.title.x=element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,-2.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+average_relativised_pool_counts_copies_4FR_ggplot
+
+
+#Each line separate version:
+individual_relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(population,Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  #geom_errorbar(aes(ymin=avg_value-2*se_value, ymax=avg_value+2*se_value, colour=generation),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=1,position=position_jitter(w=0.3,h=0)) +
+  #ggtitle("Proportion of reads at different NM") +
+  #ylab("Derived count relative to\n 4fold and the mean of Non-R population") +
+  ylab("Relative derived count") +
+  #ylim(0.8,1.1) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.78, 1.12)) +
+  scale_shape_manual(values=c(1,16)) +
+  scale_colour_manual(values=c("orange2","dodgerblue4")) +
+  #ggtitle("Individual values") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=12),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        axis.title.x=element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+individual_relativised_pool_counts_copies_4FR_ggplot
+ggsave("NR_individual_sep_Nrelativised_counts_copies_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+####Recombination:
+#####High and low relativised separately by N fourfold:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+
+#High recombination counts:
+#Define variables and read raw counts file:
+pool_counts_high <- read_tsv(paste0(wd_path,"counts_individual_NR_summary.high_recombination.txt"))
+pool_counts_high$population = factor(pool_counts_high$population)
+
+#Relativise by fourfold values:
+pool_counts_copies_high_4FR <- pool_counts_high %>% mutate(fourfold=fourfold_D/fourfold_D,tolerated=tolerated_D/fourfold_D,deleterious=deleterious_D/fourfold_D,LoF=LoF_D/fourfold_D) %>% select(!contains(c("_V","_D"))) %>% gather(ratio,value,-sample,-population,factor_key=T)
+pool_counts_copies_high_4FR
+
+#Obtain per population averages and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+average_pool_counts_copies_high_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_value"=character(0),"se_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_copies_high_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(pool_counts_copies_high_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_value","se_value")
+    average_pool_counts_copies_high_4FR <- rbind(average_pool_counts_copies_high_4FR,row_data,stringsAsFactors=F)
+  }
+}
+average_pool_counts_copies_high_4FR$ratio = factor(average_pool_counts_copies_high_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_copies_high_4FR$population <- as.factor(average_pool_counts_copies_high_4FR$population)
+average_pool_counts_copies_high_4FR$avg_value <- as.double(average_pool_counts_copies_high_4FR$avg_value)
+average_pool_counts_copies_high_4FR$se_value <- as.double(average_pool_counts_copies_high_4FR$se_value)
+average_pool_counts_copies_high_4FR
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_copies_high_4FR$population)) {
+  for (r in unique(average_pool_counts_copies_high_4FR$ratio)) {
+    print(r)
+    r_average <- filter(average_pool_counts_copies_high_4FR,r==ratio & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_copies_high_4FR <- dplyr::mutate(average_pool_counts_copies_high_4FR, Nrel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_copies_high_4FR$ratio)) {
+  print(r)
+  for (p in unique(pool_counts_copies_high_4FR$population)) {
+    r_average <- filter(pool_counts_copies_high_4FR,ratio==r & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+    r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_copies_high_4FR,ratio==r & population=="N") %>% nrow()))
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_high_4FR <- mutate(pool_counts_copies_high_4FR, Nrel_value=value/r_average_vector)
+
+#For the values relativised by the "N" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+bis_average_relativised_pool_counts_copies_high_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_Nrel_value"=character(0),"se_Nrel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_copies_high_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(relativised_pool_counts_copies_high_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(relativised_pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(relativised_pool_counts_copies_high_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_Nrel_value","se_Nrel_value")
+    bis_average_relativised_pool_counts_copies_high_4FR <- rbind(bis_average_relativised_pool_counts_copies_high_4FR,row_data,stringsAsFactors=F)
+  }
+}
+bis_average_relativised_pool_counts_copies_high_4FR$ratio = factor(bis_average_relativised_pool_counts_copies_high_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+bis_average_relativised_pool_counts_copies_high_4FR$population <- as.factor(bis_average_relativised_pool_counts_copies_high_4FR$population)
+bis_average_relativised_pool_counts_copies_high_4FR$avg_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_high_4FR$avg_Nrel_value)
+bis_average_relativised_pool_counts_copies_high_4FR$se_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_high_4FR$se_Nrel_value)
+bis_average_relativised_pool_counts_copies_high_4FR
+
+
+#Low recombination counts:
+#Define variables and read raw counts file:
+pool_counts_low <- read_tsv(paste0(wd_path,"counts_individual_NR_summary.low_recombination.txt"))
+pool_counts_low$population = factor(pool_counts_low$population)
+
+#Relativise by fourfold values:
+pool_counts_copies_low_4FR <- pool_counts_low %>% mutate(fourfold=fourfold_D/fourfold_D,tolerated=tolerated_D/fourfold_D,deleterious=deleterious_D/fourfold_D,LoF=LoF_D/fourfold_D) %>% select(!contains(c("_V","_D"))) %>% gather(ratio,value,-sample,-population,factor_key=T)
+pool_counts_copies_low_4FR
+
+#Obtain per population averages and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+average_pool_counts_copies_low_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_value"=character(0),"se_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_copies_low_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(pool_counts_copies_low_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_value","se_value")
+    average_pool_counts_copies_low_4FR <- rbind(average_pool_counts_copies_low_4FR,row_data,stringsAsFactors=F)
+  }
+}
+average_pool_counts_copies_low_4FR$ratio = factor(average_pool_counts_copies_low_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_copies_low_4FR$population <- as.factor(average_pool_counts_copies_low_4FR$population)
+average_pool_counts_copies_low_4FR$avg_value <- as.double(average_pool_counts_copies_low_4FR$avg_value)
+average_pool_counts_copies_low_4FR$se_value <- as.double(average_pool_counts_copies_low_4FR$se_value)
+average_pool_counts_copies_low_4FR
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_copies_low_4FR$population)) {
+  for (r in unique(average_pool_counts_copies_low_4FR$ratio)) {
+    print(r)
+    r_average <- filter(average_pool_counts_copies_low_4FR,r==ratio & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_copies_low_4FR <- dplyr::mutate(average_pool_counts_copies_low_4FR, Nrel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_copies_low_4FR$ratio)) {
+  print(r)
+  for (p in unique(pool_counts_copies_low_4FR$population)) {
+    r_average <- filter(pool_counts_copies_low_4FR,ratio==r & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+    r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_copies_low_4FR,ratio==r & population=="N") %>% nrow()))
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_low_4FR <- mutate(pool_counts_copies_low_4FR, Nrel_value=value/r_average_vector)
+
+#For the values relativised by the "N" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+bis_average_relativised_pool_counts_copies_low_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_Nrel_value"=character(0),"se_Nrel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_copies_low_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(relativised_pool_counts_copies_low_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(relativised_pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(relativised_pool_counts_copies_low_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_Nrel_value","se_Nrel_value")
+    bis_average_relativised_pool_counts_copies_low_4FR <- rbind(bis_average_relativised_pool_counts_copies_low_4FR,row_data,stringsAsFactors=F)
+  }
+}
+bis_average_relativised_pool_counts_copies_low_4FR$ratio = factor(bis_average_relativised_pool_counts_copies_low_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+bis_average_relativised_pool_counts_copies_low_4FR$population <- as.factor(bis_average_relativised_pool_counts_copies_low_4FR$population)
+bis_average_relativised_pool_counts_copies_low_4FR$avg_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_low_4FR$avg_Nrel_value)
+bis_average_relativised_pool_counts_copies_low_4FR$se_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_low_4FR$se_Nrel_value)
+bis_average_relativised_pool_counts_copies_low_4FR
+
+
+####Then combine both datasets####
+bis_average_relativised_pool_counts_combined_copies_4FR <- rbind(cbind(bis_average_relativised_pool_counts_copies_low_4FR,recombination="low"),cbind(bis_average_relativised_pool_counts_copies_high_4FR,recombination="high"))
+bis_average_relativised_pool_counts_combined_copies_4FR$recombination = factor(bis_average_relativised_pool_counts_combined_copies_4FR$recombination,levels=c("low","high"))
+
+
+#Average version:
+average_relativised_pool_counts_copies_combined_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_combined_copies_4FR,ratio!="fourfold"), aes(ratio,avg_Nrel_value,group=interaction(recombination,population))) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  #facet_grid(. ~ ratio) +
+  #geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=recombination,shape=population),size=2,position=position_dodge(0.4)) +
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived count relative to\n 4fold and the mean of N population") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.75, 1.15)) +
+  scale_shape_manual(values=c(16,18)) +
+  scale_alpha_manual(values=c(0.8,0.4)) +
+  ggtitle("High vs. low recombination") +
+  guides(alpha="none",shape = guide_legend(order = 1),colour = guide_legend(order = 2)) +
+  labs(shape = "Population",colour = "Recombination") +
+  theme_bw() +
+  theme(text=element_text(size=9,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_blank(),
+        #axis.title=element_text(size=11,colour="black"),
+        axis.text=element_text(size=8,colour="black"),
+        axis.text.x=element_text(colour="black", angle=-90, vjust=0.5),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(hjust=0.5),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_text()
+  )
+average_relativised_pool_counts_copies_combined_4FR_ggplot
+ggsave("NR_individual_avg_Nrelativised_counts_copies_4FR.recombination.pdf", width=12, height=10, units="cm", device="pdf", path=wd_path)
+
+average_relativised_pool_counts_copies_combined_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_combined_copies_4FR,ratio!="fourfold"), aes(recombination,avg_Nrel_value,group=interaction(recombination,population))) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  #geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=recombination,shape=population),size=2,position=position_dodge(0.4)) +
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived count relative to\n 4fold and the mean of N population") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.75, 1.15)) +
+  scale_shape_manual(values=c(16,18)) +
+  scale_alpha_manual(values=c(0.8,0.4)) +
+  ggtitle("High vs. low recombination") +
+  guides(alpha="none",shape = guide_legend(order = 1),colour = guide_legend(order = 2)) +
+  labs(shape = "Population",colour = "Recombination") +
+  theme_bw() +
+  theme(text=element_text(size=9,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_blank(),
+        #axis.title=element_text(size=11,colour="black"),
+        axis.text=element_text(size=8,colour="black"),
+        axis.text.x=element_text(colour="black", angle=-90, vjust=0.5),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(hjust=0.5),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_text()
+  )
+average_relativised_pool_counts_copies_combined_4FR_ggplot
+ggsave("NR_individual_avg_Nrelativised_counts_copies_4FR.recombination.bis.pdf", width=12, height=10, units="cm", device="pdf", path=wd_path)
+
+```
+
+#####High and low relativised together by low N fourfold:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+
+#Define variables and read raw counts file:
+pool_counts <- rbind(read_tsv(paste0(wd_path,"counts_individual_NR_summary.high_recombination.txt")) %>% mutate(recombination="high"),read_tsv(paste0(wd_path,"counts_individual_NR_summary.low_recombination.txt")) %>% mutate(recombination="low"))
+pool_counts$population = factor(pool_counts$population)
+pool_counts$recombination = factor(pool_counts$recombination)
+
+#Relativise by fourfold values:
+pool_counts_copies_4FR <- pool_counts %>% mutate(fourfold=fourfold_D/fourfold_D,tolerated=tolerated_D/fourfold_D,deleterious=deleterious_D/fourfold_D,LoF=LoF_D/fourfold_D) %>% select(!contains(c("_V","_D"))) %>% gather(ratio,value,-sample,-population,-recombination, factor_key=T)
+pool_counts_copies_4FR
+
+#Obtain per population averages:
+average_pool_counts_copies_4FR <- data_frame("population"=character(0),"recombination"=character(0),"ratio"=character(0),"avg_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_copies_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (rec in unique(pool_counts_copies_4FR$recombination)) {
+    for (r in unique(pool_counts_copies_4FR$ratio)) {
+      print(paste0("working with population ", pop,", recombination ",rec,", and feature ",r))
+      pop_mean <- filter(pool_counts_copies_4FR,ratio==r & recombination==rec & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+      row_data <- cbind(pop,rec,r,pop_mean)
+      colnames(row_data) <- c("population","recombination","ratio","avg_value")
+      average_pool_counts_copies_4FR <- rbind(average_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+    }
+  }
+}
+average_pool_counts_copies_4FR$ratio = factor(average_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_copies_4FR$recombination <- as.factor(average_pool_counts_copies_4FR$recombination)
+average_pool_counts_copies_4FR$population <- as.factor(average_pool_counts_copies_4FR$population)
+average_pool_counts_copies_4FR$avg_value <- as.double(average_pool_counts_copies_4FR$avg_value)
+average_pool_counts_copies_4FR
+
+#Relativise averages by the "N low" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_copies_4FR$population)) {
+  for (rec in unique(pool_counts_copies_4FR$recombination)) {
+    for (r in unique(average_pool_counts_copies_4FR$ratio)) {
+      print(r)
+      r_average <- filter(average_pool_counts_copies_4FR,r==ratio & recombination=="low" & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+      r_average_vector <- c(r_average_vector,r_average)
+    }
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_copies_4FR <- dplyr::mutate(average_pool_counts_copies_4FR, Nlow_rel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N low" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_copies_4FR$ratio)) {
+  for (rec in unique(pool_counts_copies_4FR$recombination)) {
+    for (p in unique(pool_counts_copies_4FR$population)) {
+      r_average <- filter(pool_counts_copies_4FR,ratio==r & recombination=="low" & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+      r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_copies_4FR,ratio==r & recombination=="low" & population=="N") %>% nrow()))
+    }
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_4FR <- mutate(pool_counts_copies_4FR, Nlow_rel_value=value/r_average_vector)
+
+#For the values relativised by the "N low" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+rec_bisaverage_relativised_pool_counts_copies_4FR <- data_frame("population"=character(0),"recombination"=character(0),"ratio"=character(0),"avg_Nlow_rel_value"=character(0),"se_Nlow_rel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_copies_4FR$population)) {
+  for (rec in unique(pool_counts_copies_4FR$recombination)) {
+    for (r in unique(relativised_pool_counts_copies_4FR$ratio)) {
+      print(r)
+      pop_mean <- filter(relativised_pool_counts_copies_4FR,ratio==r & recombination==rec & population==pop) %>% select(Nlow_rel_value) %>% unlist(.,use.names=F) %>% mean()
+      #print(paste0(pop," feature ",r," average is ",pop_mean))
+      pop_se <- filter(relativised_pool_counts_copies_4FR,ratio==r & recombination==rec & population==pop) %>% select(Nlow_rel_value) %>% unlist(.,use.names=F) %>% se()
+      #print(paste0(pop," feature ",r," std error is ",pop_se))
+      row_data <- cbind(pop,rec,r,pop_mean,pop_se)
+      colnames(row_data) <- c("population","recombination","ratio","avg_Nlow_rel_value","se_Nlow_rel_value")
+      rec_bisaverage_relativised_pool_counts_copies_4FR <- rbind(rec_bisaverage_relativised_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+    }
+  }
+}
+rec_bisaverage_relativised_pool_counts_copies_4FR$ratio = factor(rec_bisaverage_relativised_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+rec_bisaverage_relativised_pool_counts_copies_4FR$recombination <- factor(rec_bisaverage_relativised_pool_counts_copies_4FR$recombination,levels=c("high","low"))
+rec_bisaverage_relativised_pool_counts_copies_4FR$population <- as.factor(rec_bisaverage_relativised_pool_counts_copies_4FR$population)
+levels(rec_bisaverage_relativised_pool_counts_copies_4FR$population) <- list("Non-R" = "N", "R-BP" = "R")
+rec_bisaverage_relativised_pool_counts_copies_4FR$avg_Nlow_rel_value <- as.double(rec_bisaverage_relativised_pool_counts_copies_4FR$avg_Nlow_rel_value)
+rec_bisaverage_relativised_pool_counts_copies_4FR$se_Nlow_rel_value <- as.double(rec_bisaverage_relativised_pool_counts_copies_4FR$se_Nlow_rel_value)
+rec_bisaverage_relativised_pool_counts_copies_4FR
+
+
+#Average version:
+bis_average_relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(rec_bisaverage_relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(recombination,avg_Nlow_rel_value,group=interaction(recombination,population))) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nlow_rel_value-se_Nlow_rel_value, ymax=avg_Nlow_rel_value+se_Nlow_rel_value, colour=population, group=interaction(recombination,population)),size=0.5,width=0.5,position=position_dodge(0.4)) +
+  geom_point(aes(fill=population,shape=population),size=2,position=position_dodge(0.4)) +
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Relative derived count") + #ylab("Derived count relative to 4fold and\n the mean of low rec. Non-R population") +
+  xlab("Recombination quartile") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.4, 1.1, by = 0.2), limits=c(0.4, 1.1)) +
+  scale_shape_manual(name="Population",labels=c("Non-R","R-BP"),values=c(21,23)) +
+  scale_alpha_manual(values=c(0.8,0.4)) +
+  scale_fill_manual(name="Population",labels=c("Non-R","R-BP"),values=c("orange2","dodgerblue4")) +
+  #ggtitle("High vs. low recombination") +
+  guides(colour="none") +
+  labs(shape = "Population") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        #axis.title=element_blank(),
+        axis.title=element_text(size=12,colour="black"),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black", size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(hjust=0.5),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_text()
+  )
+bis_average_relativised_pool_counts_copies_4FR_ggplot
+ggsave("NR_individual_avg_Nlow_relativised_counts_copies_4FR.recombination.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+
+####Combine all sites and recombination:
+```{r Plot variant count results}
+
+library(grid)
+library(gridExtra)
+library(egg)
+
+average_relativised_pool_counts_copies_4FR_ggplot
+bis_average_relativised_pool_counts_copies_4FR_ggplot
+
+ggplot_combined <- grid.arrange(set_panel_size(average_relativised_pool_counts_copies_4FR_ggplot,width=unit(4,"cm"),height=unit(6,"cm")),set_panel_size(bis_average_relativised_pool_counts_copies_4FR_ggplot,width=unit(4,"cm"),height=unit(6,"cm")),ncol=1,top=textGrob(expression(bold("A")), gp=gpar(fontsize=11,fontface="bold"),hjust=32.5),left=textGrob(expression(bold("B")), gp=gpar(fontsize=11,fontface="bold")))
+
+ggsave("20241030_main_rescue.pdf", width=18, height=17, units="cm", device="pdf", path="/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/",ggplot_combined)
+
+```
+
+###Singletons (relative to 4fold and non-rescued-average):
+####Population level:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+#Define variables and read raw counts file:
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+pool_counts <- read_tsv(paste0(wd_path,"singletons_population_NR_summary.txt"))
+pool_counts$population = factor(pool_counts$population)
+
+#Relativise by fourfold values:
+pool_counts_copies_4FR <- pool_counts %>% mutate(fourfold=fourfold_S/fourfold_S,tolerated=tolerated_S/fourfold_S,deleterious=deleterious_S/fourfold_S,LoF=LoF_S/fourfold_S) %>% select(!contains(c("_V","_S"))) %>% gather(ratio,value,-population,factor_key=T) %>% arrange(population,ratio)
+pool_counts_copies_4FR
+
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(pool_counts_copies_4FR$population)) {
+  for (r in unique(pool_counts_copies_4FR$ratio)) {
+    print(r)
+    r_average <- filter(pool_counts_copies_4FR,r==ratio & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_4FR <- dplyr::mutate(pool_counts_copies_4FR, Nrel_value=value/r_average_vector)
+
+
+#Relativised version:
+relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(population,Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived singleton count relative to\n 4fold and the mean of N population") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0, 2, by = 0.5), limits=c(0, 2)) +
+  #scale_shape_manual(values=c(1,16)) +
+  ggtitle("Singletons") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+relativised_pool_counts_copies_4FR_ggplot
+ggsave("NR_population_Nrelativised_singletons_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+
+#Relativise by fourfold values:
+pool_counts_copies_raw <- pool_counts %>% gather(ratio,value,-population,factor_key=T) %>% arrange(population,ratio)
+pool_counts_copies_raw
+
+#Absolute version:
+pool_counts_copies_ggplot <- ggplot(data=filter(pool_counts_copies_raw,ratio!="fourfold_S"), aes(population,value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_wrap(. ~ ratio,scales="free_y") +
+  #geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived singleton count") +
+  #ylim(0.6,1.2) +
+  #scale_y_continuous(breaks = seq(0, 2, by = 0.5), limits=c(0, 2)) +
+  #scale_shape_manual(values=c(1,16)) +
+  ggtitle("Singletons") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+pool_counts_copies_ggplot
+ggsave("NR_population_singletons_raw.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+####Individual level:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+#Define variables and read raw counts file:
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+pool_counts <- read_tsv(paste0(wd_path,"singletons_individual_NR_summary.txt"))
+pool_counts$population = factor(pool_counts$population)
+
+#Relativise by fourfold values:
+pool_counts_copies_4FR <- pool_counts %>% mutate(fourfold=fourfold_S/fourfold_S,tolerated=tolerated_S/fourfold_S,deleterious=deleterious_S/fourfold_S,LoF=LoF_S/fourfold_S) %>% select(!contains(c("_V","_S"))) %>% gather(ratio,value,-sample,-population,factor_key=T) %>% arrange(population,ratio)
+pool_counts_copies_4FR
+
+#Replace NaN with 0:
+is.nan.data.frame <- function(x)
+  do.call(cbind, lapply(x, is.nan))
+pool_counts_copies_4FR[is.nan(pool_counts_copies_4FR)] <- 0
+
+
+#Obtain per population averages and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+average_pool_counts_copies_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_value"=character(0),"se_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_copies_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(pool_counts_copies_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(pool_counts_copies_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(pool_counts_copies_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_value","se_value")
+    average_pool_counts_copies_4FR <- rbind(average_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+  }
+}
+average_pool_counts_copies_4FR$ratio = factor(average_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_copies_4FR$population <- as.factor(average_pool_counts_copies_4FR$population)
+average_pool_counts_copies_4FR$avg_value <- as.double(average_pool_counts_copies_4FR$avg_value)
+average_pool_counts_copies_4FR$se_value <- as.double(average_pool_counts_copies_4FR$se_value)
+average_pool_counts_copies_4FR
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_copies_4FR$population)) {
+  for (r in unique(average_pool_counts_copies_4FR$ratio)) {
+    print(r)
+    r_average <- filter(average_pool_counts_copies_4FR,r==ratio & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_copies_4FR <- dplyr::mutate(average_pool_counts_copies_4FR, Nrel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_copies_4FR$ratio)) {
+  print(r)
+  for (p in unique(pool_counts_copies_4FR$population)) {
+    r_average <- filter(pool_counts_copies_4FR,ratio==r & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+    r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_copies_4FR,ratio==r & population=="N") %>% nrow()))
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_4FR <- mutate(pool_counts_copies_4FR, Nrel_value=value/r_average_vector)
+
+#For the values relativised by the "N" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+bis_average_relativised_pool_counts_copies_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_Nrel_value"=character(0),"se_Nrel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_copies_4FR$population)) {
+#species <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(relativised_pool_counts_copies_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(relativised_pool_counts_copies_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_Nrel_value","se_Nrel_value")
+    bis_average_relativised_pool_counts_copies_4FR <- rbind(bis_average_relativised_pool_counts_copies_4FR,row_data,stringsAsFactors=F)
+  }
+}
+bis_average_relativised_pool_counts_copies_4FR$ratio = factor(bis_average_relativised_pool_counts_copies_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+bis_average_relativised_pool_counts_copies_4FR$population <- as.factor(bis_average_relativised_pool_counts_copies_4FR$population)
+bis_average_relativised_pool_counts_copies_4FR$avg_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_4FR$avg_Nrel_value)
+bis_average_relativised_pool_counts_copies_4FR$se_Nrel_value <- as.double(bis_average_relativised_pool_counts_copies_4FR$se_Nrel_value)
+bis_average_relativised_pool_counts_copies_4FR
+
+  
+***** REMOVE THE FOLLOWING IF IT HAS BEEN INTEGRATED ABOVE?
+
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(pool_counts_copies_4FR$population)) {
+  for (r in unique(pool_counts_copies_4FR$ratio)) {
+    print(r)
+    r_average <- filter(pool_counts_copies_4FR,r==ratio & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_copies_4FR <- dplyr::mutate(pool_counts_copies_4FR, Nrel_value=value/r_average_vector)
+
+*****
+
+#Relativised version:
+relativised_pool_counts_copies_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_copies_4FR,ratio!="fourfold"), aes(population,Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived singleton count relative to\n 4fold and the mean of N population") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0, 2, by = 0.5), limits=c(0, 2)) +
+  #scale_shape_manual(values=c(1,16)) +
+  ggtitle("Singletons") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+relativised_pool_counts_copies_4FR_ggplot
+ggsave("NR_population_Nrelativised_singletons_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+
+#Relativise by fourfold values:
+pool_counts_copies_raw <- pool_counts %>% gather(ratio,value,-population,factor_key=T) %>% arrange(population,ratio)
+pool_counts_copies_raw
+
+#Absolute version:
+pool_counts_copies_ggplot <- ggplot(data=filter(pool_counts_copies_raw,ratio!="fourfold_S"), aes(population,value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_wrap(. ~ ratio,scales="free_y") +
+  #geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Derived singleton count") +
+  #ylim(0.6,1.2) +
+  #scale_y_continuous(breaks = seq(0, 2, by = 0.5), limits=c(0, 2)) +
+  #scale_shape_manual(values=c(1,16)) +
+  ggtitle("Singletons") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+pool_counts_copies_ggplot
+ggsave("NR_population_singletons_raw.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+##Site statistics:
+###Site ratios (relative to 4fold and non-rescued-average):
+####All sites:
+```{r Plot variant count results}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+#Define variables and read raw counts file:
+wd_path <- paste0("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+pool_counts <- read_tsv(paste0(wd_path,"counts_individual_NR_summary.txt"))
+pool_counts$population = factor(pool_counts$population)
+
+#Relativise by fourfold values:
+pool_counts_sites_4FR <- pool_counts %>% mutate(fourfold=fourfold_V/fourfold_V,tolerated=tolerated_V/fourfold_V,deleterious=deleterious_V/fourfold_V,LoF=LoF_V/fourfold_V) %>% select(!contains(c("_V","_D"))) %>% gather(ratio,value,-sample,-population,factor_key=T)
+pool_counts_sites_4FR
+
+#Obtain per population averages and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+average_pool_counts_sites_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_value"=character(0),"se_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(pool_counts_sites_4FR$population)) {
+#species <- filter(relativised_pool_counts_sites_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(pool_counts_sites_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(pool_counts_sites_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(pool_counts_sites_4FR,ratio==r & population==pop) %>% select(value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_value","se_value")
+    average_pool_counts_sites_4FR <- rbind(average_pool_counts_sites_4FR,row_data,stringsAsFactors=F)
+  }
+}
+average_pool_counts_sites_4FR$ratio = factor(average_pool_counts_sites_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+average_pool_counts_sites_4FR$population <- as.factor(average_pool_counts_sites_4FR$population)
+average_pool_counts_sites_4FR$avg_value <- as.double(average_pool_counts_sites_4FR$avg_value)
+average_pool_counts_sites_4FR$se_value <- as.double(average_pool_counts_sites_4FR$se_value)
+average_pool_counts_sites_4FR
+
+#Relativise averages by the "N" population averages:
+r_average_vector <- c()
+for (p in unique(average_pool_counts_sites_4FR$population)) {
+  for (r in unique(average_pool_counts_sites_4FR$ratio)) {
+    print(r)
+    r_average <- filter(average_pool_counts_sites_4FR,r==ratio & population=="N") %>% select(avg_value) %>% unlist(.,use.names=F) %>% as.double()
+    r_average_vector <- c(r_average_vector,r_average)
+  }
+}
+print(r_average_vector)
+average_relativised_pool_counts_sites_4FR <- dplyr::mutate(average_pool_counts_sites_4FR, Nrel_avg_value=avg_value/r_average_vector)
+
+#Obtain individual values relativised by the "N" population averages:
+r_average_vector <- c()
+for (r in unique(pool_counts_sites_4FR$ratio)) {
+  print(r)
+  for (p in unique(pool_counts_sites_4FR$population)) {
+    r_average <- filter(pool_counts_sites_4FR,ratio==r & population=="N") %>% select(value) %>% unlist(.,use.names=F) %>% as.double() %>% mean()
+    r_average_vector <- c(r_average_vector,rep(r_average,filter(pool_counts_sites_4FR,ratio==r & population=="N") %>% nrow()))
+  }
+}
+print(r_average_vector)
+relativised_pool_counts_sites_4FR <- mutate(pool_counts_sites_4FR, Nrel_value=value/r_average_vector)
+
+#For the values relativised by the "N" averages, obtain per population averages (which should be the same as the ones obtained before) and standard errors:
+se <- function(x) sqrt(var(x)/length(x)) #first define the standard error function
+bis_average_relativised_pool_counts_sites_4FR <- data_frame("population"=character(0),"ratio"=character(0),"avg_Nrel_value"=character(0),"se_Nrel_value"=character(0)) #next, create the empty dataframe
+for (pop in unique(relativised_pool_counts_sites_4FR$population)) {
+#species <- filter(relativised_pool_counts_sites_4FR,ratio==r & population==pop) %>% select(species) %>% unlist(.,use.names=F) %>% unique()
+  for (r in unique(relativised_pool_counts_sites_4FR$ratio)) {
+    print(r)
+    pop_mean <- filter(relativised_pool_counts_sites_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% mean()
+    #print(paste0(pop," feature ",r," average is ",pop_mean))
+    pop_se <- filter(relativised_pool_counts_sites_4FR,ratio==r & population==pop) %>% select(Nrel_value) %>% unlist(.,use.names=F) %>% se()
+    #print(paste0(pop," feature ",r," std error is ",pop_se))
+    row_data <- cbind(pop,r,pop_mean,pop_se)
+    colnames(row_data) <- c("population","ratio","avg_Nrel_value","se_Nrel_value")
+    bis_average_relativised_pool_counts_sites_4FR <- rbind(bis_average_relativised_pool_counts_sites_4FR,row_data,stringsAsFactors=F)
+  }
+}
+bis_average_relativised_pool_counts_sites_4FR$ratio = factor(bis_average_relativised_pool_counts_sites_4FR$ratio,levels=c("fourfold","tolerated","deleterious","LoF"))
+bis_average_relativised_pool_counts_sites_4FR$population <- as.factor(bis_average_relativised_pool_counts_sites_4FR$population)
+bis_average_relativised_pool_counts_sites_4FR$avg_Nrel_value <- as.double(bis_average_relativised_pool_counts_sites_4FR$avg_Nrel_value)
+bis_average_relativised_pool_counts_sites_4FR$se_Nrel_value <- as.double(bis_average_relativised_pool_counts_sites_4FR$se_Nrel_value)
+bis_average_relativised_pool_counts_sites_4FR
+
+
+
+#Average version:
+average_relativised_pool_counts_sites_4FR_ggplot <- ggplot(data=filter(bis_average_relativised_pool_counts_sites_4FR,ratio!="fourfold"), aes(population,avg_Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  geom_errorbar(aes(ymin=avg_Nrel_value-se_Nrel_value, ymax=avg_Nrel_value+se_Nrel_value, colour=population),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=2) + 
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Site number relative to\n 4fold and the mean of N population") +
+  ylim(0.6,1.2) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.78, 1.12)) +
+  #scale_shape_manual(values=c(1,16)) +
+  ggtitle("Population means") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+average_relativised_pool_counts_sites_4FR_ggplot
+ggsave("NR_individual_avg_Nrelativised_counts_sites_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+
+#Each line separate version:
+individual_relativised_pool_counts_sites_4FR_ggplot <- ggplot(data=filter(relativised_pool_counts_sites_4FR,ratio!="fourfold"), aes(population,Nrel_value)) +
+  #facet_wrap(feature ~ species,nrow=6,ncol=2,scales="free") +
+  facet_grid(. ~ ratio) +
+  #geom_errorbar(aes(ymin=avg_value-2*se_value, ymax=avg_value+2*se_value, colour=generation),size=0.5,width=0.5) +
+  geom_point(aes(colour=population),size=0.5,position=position_jitter(w=0.2,h=0)) +
+  #ggtitle("Proportion of reads at different NM") +
+  ylab("Site number relative to\n 4fold and the mean of N population") +
+  #ylim(0.8,1.1) +
+  scale_y_continuous(breaks = seq(0.8, 1.2, by = 0.1), limits=c(0.78, 1.22)) +
+  scale_shape_manual(values=c(1,16)) +
+  ggtitle("Individual values") +
+  guides(colour="none") +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,0.5,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+individual_relativised_pool_counts_sites_4FR_ggplot
+ggsave("NR_individual_sep_Nrelativised_counts_sites_4FR.pdf", width=15, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+##SFS:
+###Exclude AF=0:
+```{r}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+wd_path <- ("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+NR_SFS_allele_count <- read_tsv(paste0(wd_path,"NR_SFS_allele_count.txt"))
+NR_SFS_allele_count$population <- factor(NR_SFS_allele_count$population)
+
+NR_SFS_allele_count_tidy <- NR_SFS_allele_count %>% gather(category,n,-population,-derived_count,factor_key=T)
+NR_SFS_allele_count_tidy
+NR_SFS_allele_count_tidy$derived_count <- as.factor(NR_SFS_allele_count_tidy$derived_count)
+
+
+#Plot:
+NR_SFS_allele_count_ggplot <- ggplot(data=filter(NR_SFS_allele_count_tidy), aes(derived_count,n)) +
+  facet_wrap(~category,nrow=2,ncol=2,scales="free_y") +
+  #facet_grid(. ~ population) +
+  #geom_bar(stat="identity", colour="black", position="dodge")
+  geom_col(aes(fill=population), position="dodge") +
+  #geom_errorbar(aes(ymin=avg_Pb_raw_value-se_Pb_raw_value, ymax=avg_Pb_raw_value+se_Pb_raw_value), position=position_dodge(), width=0.5) +
+  ggtitle("Derived allele SFS") +
+  ylab("Number of sites") +
+  xlab("Derived allele count") +
+  #ggtitle("Pools, lines (average)") +
+  #guides(colour="none") +
+  #scale_colour_manual(values=c(hue_pal()(5)[4:5])) +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(angle=90,hjust=1,vjust = 0.5,colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,1,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+NR_SFS_allele_count_ggplot
+ggsave(paste0("NR_SFS.pdf"), width=40, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+###Include AF=0:
+```{r}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+
+
+wd_path <- ("/Users/dani/Documents/dani/Post-docs/2022_contrato_Vigo/drosophila_load/rescate/counts/")
+NR_SFS_allele_count <- read_tsv(paste0(wd_path,"NR_SFS_allele_count_with_af0.txt"))
+NR_SFS_allele_count$population <- factor(NR_SFS_allele_count$population)
+
+NR_SFS_allele_count_tidy <- NR_SFS_allele_count %>% gather(category,n,-population,-derived_count,factor_key=T)
+NR_SFS_allele_count_tidy
+NR_SFS_allele_count_tidy$derived_count <- as.factor(NR_SFS_allele_count_tidy$derived_count)
+
+
+#Plot:
+NR_SFS_allele_count_ggplot <- ggplot(data=filter(NR_SFS_allele_count_tidy), aes(derived_count,n)) +
+  facet_wrap(~category,nrow=2,ncol=2,scales="free_y") +
+  #facet_grid(. ~ population) +
+  #geom_bar(stat="identity", colour="black", position="dodge")
+  geom_col(aes(fill=population), position="dodge") +
+  #geom_errorbar(aes(ymin=avg_Pb_raw_value-se_Pb_raw_value, ymax=avg_Pb_raw_value+se_Pb_raw_value), position=position_dodge(), width=0.5) +
+  ggtitle("Derived allele SFS") +
+  ylab("Number of sites") +
+  xlab("Derived allele count") +
+  #ggtitle("Pools, lines (average)") +
+  #guides(colour="none") +
+  #scale_colour_manual(values=c(hue_pal()(5)[4:5])) +
+  theme_bw() +
+  theme(text=element_text(size=12,face="bold"),
+        rect=element_rect(size=1),
+        axis.line=element_line(colour="black"),
+        axis.title=element_text(size=16),
+        axis.text=element_text(size=10,colour="black"),
+        axis.text.x=element_text(angle=90,hjust=1,vjust = 0.5,colour="black",size=10),
+        #axis.text.y=element_text(size=24,colour="black",margin=margin(t=0.5,unit="cm")),
+        #axis.title.y=element_text(size=30,margin=margin(r=0.5,unit="cm")),
+        panel.background=element_blank(),
+        panel.border=element_rect(colour="black"),
+        #panel.grid=element_blank(),
+        #panel.grid.major=element_line(colour="grey", linetype="dashed", size=0.4),
+        plot.margin=unit(c(0.5,1,0.5,0.5),"cm"),
+        #plot.title=element_text(size=36, face="bold", margin=margin(b=0.5, unit="cm")),
+        legend.background=element_rect(linetype="solid", colour="black", size=.5),
+        #legend.justification=c(0,0),
+        legend.key=element_rect(colour="white"),
+        #legend.key.size=unit(1.3,"cm"),
+        #legend.position="none",
+        legend.title=element_blank()
+  )
+NR_SFS_allele_count_ggplot
+ggsave(paste0("NR_SFS_with_af0.pdf"), width=40, height=12, units="cm", device="pdf", path=wd_path)
+
+```
+
+#15. Other.
+##Generate ped and map for each vcf.
+```{bash}
+
+module load vcftools/0.1.17
+cd /share/rdata2/dani_k/proyecto_rescate/counts/
+
+POPULATIONS=$(ls *population_w-g.raw_snps.vcf)
+for vcf in ${POPULATIONS[@]}
+  do
+  vcftools --vcf $vcf --plink --out roh_analysis/${vcf/.vcf/.out} --chrom-map /share/rdata2/dani_k/proyecto_rescate/counts/roh_analysis/dros_chrom_map.txt
+  done
+
+```
+
+##Generate a bed for each individual vcf and category.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts/
+
+POPULATIONS=$(ls *individual.vcf)
+for vcf in ${POPULATIONS[@]}
+  do
+  grep "CUSTOM=tolerated;" $vcf | awk -F"\t" '{printf ("%s\t%s\t%s\n", $1,$2-1,$2)}' > roh_analysis/${vcf/.vcf/_tolerated.bed}
+  grep "CUSTOM=deleterious;" $vcf | awk -F"\t" '{printf ("%s\t%s\t%s\n", $1,$2-1,$2)}' > roh_analysis/${vcf/.vcf/_deleterious.bed}
+  grep "CUSTOM=LoF;" $vcf | awk -F"\t" '{printf ("%s\t%s\t%s\n", $1,$2-1,$2)}' > roh_analysis/${vcf/.vcf/_LoF.bed}
+  done
+
+```
+
+##Calculate number of heterozygotes and homozygotes in the VCFs.
+```{bash}
+
+module load gcc/7.2.0
+module add gcc/7.2.0
+cd /share/rdata2/dani_k/proyecto_rescate/counts/
+
+POPULATIONS=$(ls *population_w-g.raw_snps.vcf)
+rm *.clean_genotypes
+for vcf in ${POPULATIONS[@]}
+  do
+  echo $vcf
+  #grep -v '^#' $vcf | cut -f10- -d$'\t' > ${vcf/.vcf/.raw_genotypes}
+  echo "ind. 1" 
+  cut -f1 -d$'\t' ${vcf/.vcf/.raw_genotypes} | cut -d':' -f1 > ${vcf/.vcf/.clean_genotypes}
+  for i in {2..12}; do echo "ind. $i"; cut -f$i -d$'\t' ${vcf/.vcf/.raw_genotypes} | cut -d':' -f1 > ${vcf/.vcf/.${i}_genotypes}; paste ${vcf/.vcf/.clean_genotypes} ${vcf/.vcf/.${i}_genotypes} > ${vcf/.vcf/.pasted_genotypes} && mv ${vcf/.vcf/.pasted_genotypes} ${vcf/.vcf/.clean_genotypes} && rm ${vcf/.vcf/.${i}_genotypes}; done
+  done
+  
+for vcf in ${POPULATIONS[@]}
+  do
+  echo $vcf
+  echo "heterozygotes"
+  for i in {1..12}; do cut -f$i ${vcf/.vcf/.clean_genotypes} | awk -F'\t' '($1 == "0/1") || ($1 == "0|1") { count ++ } END { print count }'; done
+  echo "homozygotes"
+  for i in {1..12}; do cut -f$i ${vcf/.vcf/.clean_genotypes} | awk -F'\t' '($1 == "1/1") || ($1 == "1|1") { count ++ } END { print count }'; done
+  done
+
+
+```
